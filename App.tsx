@@ -40,7 +40,9 @@ export function App() {
   const [handControlEnabled, setHandControlEnabled] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const previousHandPos = useRef<{x: number, y: number} | null>(null);
-
+  const smoothedHandPos = useRef<{x: number, y: number} | null>(null);
+  const handVelocity = useRef<{x: number, y: number}>({ x: 0, y: 0 });
+  const lastHandTs = useRef<number | null>(null);
   // Refs for Three.js objects
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -91,17 +93,37 @@ export function App() {
             const hand = landmarks[rightHandIndex];
             
             // --- Panning Logic (Wrist) ---
-            const currentX = hand[0].x;
-            const currentY = hand[0].y;
+            const rawX = hand[0].x;
+            const rawY = hand[0].y;
+
+            if (!smoothedHandPos.current) {
+                smoothedHandPos.current = { x: rawX, y: rawY };
+            } else {
+                // Low-pass filter to reduce jitter.
+                smoothedHandPos.current = {
+                    x: THREE.MathUtils.lerp(smoothedHandPos.current.x, rawX, 0.25),
+                    y: THREE.MathUtils.lerp(smoothedHandPos.current.y, rawY, 0.25),
+                };
+            }
 
             if (previousHandPos.current) {
                 // Sensitivity factor
                 const sensitivity = 200; 
+                const now = performance.now();
+                const dt = lastHandTs.current ? Math.min((now - lastHandTs.current) / 1000, 0.05) : 1 / 60;
+                lastHandTs.current = now;
                 
                 // Calculate deltas
                 // Note: In selfie mode, x moves normal (left is 0, right is 1)
-                const deltaX = (currentX - previousHandPos.current.x) * sensitivity;
-                const deltaY = (currentY - previousHandPos.current.y) * sensitivity;
+                const deltaX = (smoothedHandPos.current.x - previousHandPos.current.x) * sensitivity;
+                const deltaY = (smoothedHandPos.current.y - previousHandPos.current.y) * sensitivity;
+                const deadZone = 0.25;
+                const targetX = Math.abs(deltaX) < deadZone ? 0 : deltaX;
+                const targetY = Math.abs(deltaY) < deadZone ? 0 : deltaY;
+                const smooth = 0.85;
+                handVelocity.current.x = THREE.MathUtils.lerp(handVelocity.current.x, targetX, 1 - smooth);
+                handVelocity.current.y = THREE.MathUtils.lerp(handVelocity.current.y, targetY, 1 - smooth);
+                const speed = Math.min(dt * 60, 2);
 
                 const cameraObj = cameraRef.current;
                 
@@ -114,15 +136,14 @@ export function App() {
                 // Hand Down (+Y in MP) -> Camera moves Down (-UpVector)
                 
                 const panVector = new THREE.Vector3()
-                    .addScaledVector(right, deltaX)
-                    .addScaledVector(up, -deltaY); 
+                    .addScaledVector(right, handVelocity.current.x * speed)
+                    .addScaledVector(up, -handVelocity.current.y * speed); 
                 
                 cameraObj.position.add(panVector);
                 controlsRef.current.target.add(panVector);
             }
 
-            previousHandPos.current = { x: currentX, y: currentY };
-
+            previousHandPos.current = { x: smoothedHandPos.current.x, y: smoothedHandPos.current.y };
             // --- Continuous Zoom Logic (Thumb Tip 4 to Index Tip 8) ---
             const thumb = hand[4];
             const index = hand[8];
@@ -157,6 +178,9 @@ export function App() {
         } else {
             // Reset if hand lost or wrong hand
             previousHandPos.current = null;
+            smoothedHandPos.current = null;
+            handVelocity.current = { x: 0, y: 0 };
+            lastHandTs.current = null;
         }
     };
 
@@ -557,9 +581,9 @@ export function App() {
                                     <Hand className="w-3 h-3" />
                                     <span className="font-bold">Right Hand Active</span>
                                 </div>
-                                <span className="opacity-70 pl-5">â€¢ Move hand to pan</span>
-                                <span className="opacity-70 pl-5">â€¢ Pinch close: Zoom In</span>
-                                <span className="opacity-70 pl-5">â€¢ Pinch open: Zoom Out</span>
+                                <span className="opacity-70 pl-5">â€?Move hand to pan</span>
+                                <span className="opacity-70 pl-5">â€?Pinch close: Zoom In</span>
+                                <span className="opacity-70 pl-5">â€?Pinch open: Zoom Out</span>
                              </div>
                          )}
 
@@ -624,3 +648,4 @@ const ControlSlider: React.FC<{
         </div>
     );
 };
+
