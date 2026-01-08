@@ -17,7 +17,7 @@ const Hands = (mpHandsPkg as any).Hands || (mpHandsPkg as any).default?.Hands;
 const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Camera;
 
 // Use a simple relative path. The file should be in the public root.
-const DEFAULT_IMAGE = "./A.png";
+const DEFAULT_IMAGE = "/A.png";
 
 // Fallback in case A.png is missing
 const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1563089145-599997674d42?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80";
