@@ -18,6 +18,16 @@ const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Ca
 
 // Use a simple relative path. The file should be in the public root.
 const DEFAULT_IMAGE = "/A.png";
+const WORLD_B_IMAGE = "/B.png";
+const MIN_ZOOM_DISTANCE = 50;
+const MAX_ZOOM_DISTANCE = 2000;
+const DEEP_ZONE_DISTANCE = 70;
+const RETURN_ZONE_DISTANCE = 220;
+const RETURN_MARGIN = 60;
+const RETURN_ARM_MARGIN = 10;
+const REENTER_ARM_MARGIN = 20;
+const WORLD_B_MAX_DISTANCE_FACTOR = 1.1;
+const OK_HOLD_MS = 3000;
 
 // Fallback in case A.png is missing
 const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1563089145-599997674d42?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80";
@@ -27,6 +37,8 @@ const MAX_GROWTH = 0.85;
 const ZOOM_IN_THRESHOLD = 0.05; // Fingers close together
 const ZOOM_OUT_THRESHOLD = 0.12; // Fingers spread apart
 
+type ViewState = { position: THREE.Vector3; target: THREE.Vector3 };
+
 export function App() {
   const mountRef = useRef<HTMLDivElement>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(DEFAULT_IMAGE);
@@ -34,8 +46,20 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [animating, setAnimating] = useState(false);
   const animatingRef = useRef(false); 
-  const [growth, setGrowth] = useState(0); 
-  
+  const [growth, setGrowth] = useState(0);
+  const [currentWorld, setCurrentWorld] = useState<'A' | 'B'>('A');
+  const [worldBUnlocked, setWorldBUnlocked] = useState(false);
+  const [deepZoneReached, setDeepZoneReached] = useState(false);
+  const [okHoldProgress, setOkHoldProgress] = useState(0);
+  const currentWorldRef = useRef<'A' | 'B'>('A');
+  const worldBUnlockedRef = useRef(false);
+  const deepZoneActiveRef = useRef(false);
+  const deepZoneReachedRef = useRef(false);
+  const okHoldStartRef = useRef<number | null>(null);
+  const okHoldProgressRef = useRef(0);
+  const worldAImageRef = useRef<string | null>(DEFAULT_IMAGE);
+  const worldBImageRef = useRef<string | null>(WORLD_B_IMAGE);
+
   // Hand Gesture State
   const [handControlEnabled, setHandControlEnabled] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -52,6 +76,21 @@ export function App() {
   const clockRef = useRef<THREE.Clock>(new THREE.Clock());
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const pointsRef = useRef<THREE.Points | null>(null);
+  const textureCacheRef = useRef<Record<string, THREE.Texture>>({});
+  const textureLoadingRef = useRef<Record<string, Promise<THREE.Texture>>>({});
+  const textureLoaderRef = useRef<THREE.TextureLoader | null>(null);
+  const defaultViewRef = useRef<ViewState | null>(null);
+  const worldAViewRef = useRef<ViewState | null>(null);
+  const worldBViewRef = useRef<ViewState | null>(null);
+  const worldBVisitedRef = useRef(false);
+  const worldBReturnDistanceRef = useRef<number | null>(null);
+  const worldBReturnArmedRef = useRef(false);
+  const worldBEntryArmedRef = useRef(false);
+  const worldAGrowthRef = useRef(0);
+  const worldBGrowthRef = useRef(MAX_GROWTH);
+  const defaultMaxDistanceRef = useRef<number | null>(null);
+  const initialAGrowthCompletedRef = useRef(false);
 
   // Parameters
   const paramsRef = useRef({
@@ -64,6 +103,334 @@ export function App() {
     growthSpeed: 0.005,
   });
 
+  const getTextureLoader = () => {
+    if (!textureLoaderRef.current) {
+      const loader = new THREE.TextureLoader();
+      loader.crossOrigin = 'anonymous';
+      textureLoaderRef.current = loader;
+    }
+    return textureLoaderRef.current as THREE.TextureLoader;
+  };
+
+  const applyTextureOrientation = (texture: THREE.Texture, url: string) => {
+    if (url !== WORLD_B_IMAGE) return;
+    if (texture.flipY !== false) {
+      texture.flipY = false;
+      texture.needsUpdate = true;
+    }
+  };
+
+  const loadTexture = useCallback((url: string) => {
+    const cachedTexture = textureCacheRef.current[url];
+    if (cachedTexture) {
+      applyTextureOrientation(cachedTexture, url);
+      return Promise.resolve(cachedTexture);
+    }
+    if (textureLoadingRef.current[url]) {
+      return textureLoadingRef.current[url];
+    }
+
+    const loader = getTextureLoader();
+    const promise = new Promise<THREE.Texture>((resolve, reject) => {
+      loader.load(
+        url,
+        (texture) => {
+          applyTextureOrientation(texture, url);
+          textureCacheRef.current[url] = texture;
+          delete textureLoadingRef.current[url];
+          resolve(texture);
+        },
+        undefined,
+        (err) => {
+          delete textureLoadingRef.current[url];
+          reject(err);
+        }
+      );
+    });
+
+    textureLoadingRef.current[url] = promise;
+    return promise;
+  }, []);
+
+  const buildGeometryFromTexture = useCallback((texture: THREE.Texture) => {
+    const img = texture.image as { width?: number; height?: number };
+    const imgWidth = img?.width || 1;
+    const imgHeight = img?.height || 1;
+
+    const maxDim = 600;
+    let rw = imgWidth;
+    let rh = imgHeight;
+    if (imgWidth > maxDim || imgHeight > maxDim) {
+      const aspect = imgWidth / imgHeight;
+      if (imgWidth > imgHeight) {
+        rw = maxDim;
+        rh = maxDim / aspect;
+      } else {
+        rh = maxDim;
+        rw = maxDim * aspect;
+      }
+    }
+
+    return new THREE.PlaneGeometry(rw, rh, Math.floor(rw), Math.floor(rh));
+  }, []);
+
+  const applyTextureToScene = useCallback((texture: THREE.Texture, resetGrowth: boolean) => {
+    if (!pointsRef.current || !materialRef.current) return;
+
+    const newGeometry = buildGeometryFromTexture(texture);
+    pointsRef.current.geometry.dispose();
+    pointsRef.current.geometry = newGeometry;
+    materialRef.current.uniforms.uTexture.value = texture;
+    materialRef.current.uniforms.uTexture.needsUpdate = true;
+
+    if (resetGrowth) {
+      materialRef.current.uniforms.uGrowth.value = 0.0;
+      animatingRef.current = true;
+      setAnimating(true);
+      setGrowth(0);
+    }
+  }, [buildGeometryFromTexture]);
+
+  const preloadTexture = useCallback((url: string | null) => {
+    if (!url) return;
+    void loadTexture(url).catch((err) => {
+      console.warn(`Failed to preload texture: ${url}`, err);
+    });
+  }, [loadTexture]);
+
+  const swapTexture = useCallback(async (
+    textureUrl: string,
+    options: { resetGrowth?: boolean; isDefault?: boolean } = {}
+  ) => {
+    const { resetGrowth = true, isDefault = false } = options;
+    try {
+      const texture = await loadTexture(textureUrl);
+      applyTextureToScene(texture, resetGrowth);
+    } catch (err) {
+      if (isDefault) {
+        console.warn(`Default image at ${textureUrl} failed to load. Falling back.`, err);
+        try {
+          const fallbackTexture = await loadTexture(FALLBACK_IMAGE);
+          if (currentWorldRef.current === 'A') {
+            worldAImageRef.current = FALLBACK_IMAGE;
+          } else {
+            worldBImageRef.current = FALLBACK_IMAGE;
+          }
+          applyTextureToScene(fallbackTexture, resetGrowth);
+        } catch (fallbackErr) {
+          console.error("Fallback texture failed to load", fallbackErr);
+          setError("Could not load image. Please try a valid image file or URL.");
+        }
+      } else {
+        console.error("Texture Load Error:", err);
+        setError("Could not load image. Please try a valid image file or URL.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [applyTextureToScene, loadTexture]);
+
+  const cloneViewState = (state: ViewState) => ({
+    position: state.position.clone(),
+    target: state.target.clone(),
+  });
+
+  const captureViewState = () => {
+    if (!cameraRef.current || !controlsRef.current) return null;
+    return {
+      position: cameraRef.current.position.clone(),
+      target: controlsRef.current.target.clone(),
+    };
+  };
+
+  const applyViewState = (state: ViewState | null) => {
+    if (!state || !cameraRef.current || !controlsRef.current) return;
+    cameraRef.current.position.copy(state.position);
+    controlsRef.current.target.copy(state.target);
+    controlsRef.current.update();
+  };
+
+  const syncGrowthRef = (value: number) => {
+    if (currentWorldRef.current === 'A') {
+      worldAGrowthRef.current = value;
+    } else {
+      worldBGrowthRef.current = value;
+    }
+  };
+
+  const setGrowthInstant = (value: number) => {
+    animatingRef.current = false;
+    setAnimating(false);
+    setGrowth(value);
+    syncGrowthRef(value);
+    if (materialRef.current) {
+      materialRef.current.uniforms.uGrowth.value = value;
+    }
+    if (currentWorldRef.current === 'A' && value >= MAX_GROWTH) {
+      initialAGrowthCompletedRef.current = true;
+    }
+  };
+
+  const getWorldMaxZoomDistance = (world: 'A' | 'B') => {
+    if (world === 'B') {
+      return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_B_MAX_DISTANCE_FACTOR;
+    }
+    return MAX_ZOOM_DISTANCE;
+  };
+
+  const applyZoomLimits = (world: 'A' | 'B') => {
+    if (!controlsRef.current) return;
+    controlsRef.current.minDistance = MIN_ZOOM_DISTANCE;
+    controlsRef.current.maxDistance = getWorldMaxZoomDistance(world);
+  };
+
+  const updateWorldBReturnDistance = () => {
+    if (!cameraRef.current || !controlsRef.current) return;
+    const distToTarget = cameraRef.current.position.distanceTo(controlsRef.current.target);
+    const maxDistance = getWorldMaxZoomDistance('B');
+    worldBReturnDistanceRef.current = Math.min(distToTarget + RETURN_MARGIN, maxDistance);
+  };
+
+  const snapshotCurrentWorld = () => {
+    const viewState = captureViewState();
+    if (viewState) {
+      if (currentWorldRef.current === 'A') {
+        worldAViewRef.current = viewState;
+      } else {
+        worldBViewRef.current = viewState;
+      }
+    }
+    syncGrowthRef(growth);
+  };
+
+  const setOkProgress = (progress: number) => {
+    okHoldProgressRef.current = progress;
+    setOkHoldProgress(progress);
+  };
+
+  const resetOkHold = () => {
+    okHoldStartRef.current = null;
+    if (okHoldProgressRef.current !== 0) {
+        setOkProgress(0);
+    }
+  };
+
+  const unlockWorldB = () => {
+    if (worldBUnlockedRef.current) return;
+    worldBUnlockedRef.current = true;
+    setWorldBUnlocked(true);
+  };
+
+  const switchWorld = (nextWorld: 'A' | 'B') => {
+    if (currentWorldRef.current === nextWorld) return;
+
+    snapshotCurrentWorld();
+
+    if (currentWorldRef.current === 'A' && nextWorld === 'B' && !initialAGrowthCompletedRef.current) {
+        worldAGrowthRef.current = MAX_GROWTH;
+        initialAGrowthCompletedRef.current = true;
+    }
+
+    currentWorldRef.current = nextWorld;
+    setCurrentWorld(nextWorld);
+    const nextImage = nextWorld === 'A' ? worldAImageRef.current : worldBImageRef.current;
+    if (nextImage) {
+        const isDefaultTexture = nextImage === DEFAULT_IMAGE || nextImage === WORLD_B_IMAGE;
+        void swapTexture(nextImage, { resetGrowth: false, isDefault: isDefaultTexture });
+        const preloadTarget = nextWorld === 'A' ? worldBImageRef.current : worldAImageRef.current;
+        preloadTexture(preloadTarget);
+    }
+
+    if (nextWorld === 'B') {
+        if (!worldBVisitedRef.current) {
+            worldBVisitedRef.current = true;
+            if (defaultViewRef.current) {
+                const initialView = cloneViewState(defaultViewRef.current);
+                const maxDistance = getWorldMaxZoomDistance('B');
+                const offset = initialView.position.clone().sub(initialView.target);
+                const currentDistance = offset.length();
+                if (currentDistance > 0) {
+                    offset.setLength(maxDistance);
+                    initialView.position.copy(initialView.target).add(offset);
+                }
+                worldBViewRef.current = initialView;
+                applyViewState(initialView);
+            }
+        } else {
+            if (worldBViewRef.current) {
+                applyViewState(worldBViewRef.current);
+            }
+        }
+        setGrowthInstant(MAX_GROWTH);
+        updateWorldBReturnDistance();
+        worldBReturnArmedRef.current = false;
+    } else {
+        if (worldAViewRef.current) {
+            applyViewState(worldAViewRef.current);
+        }
+        if (initialAGrowthCompletedRef.current) {
+            worldAGrowthRef.current = MAX_GROWTH;
+            setGrowthInstant(MAX_GROWTH);
+        } else {
+            setGrowthInstant(worldAGrowthRef.current);
+        }
+        worldBEntryArmedRef.current = false;
+    }
+
+    applyZoomLimits(nextWorld);
+    resetOkHold();
+  };
+
+  const setWorldImage = (nextImage: string) => {
+    if (currentWorldRef.current === 'A') {
+        worldAImageRef.current = nextImage;
+    } else {
+        worldBImageRef.current = nextImage;
+    }
+    setImageSrc(nextImage);
+  };
+
+  const handleDemoImage = () => {
+    const demoImage = currentWorldRef.current === 'A' ? DEFAULT_IMAGE : WORLD_B_IMAGE;
+    setWorldImage(demoImage);
+  };
+
+  const isOkGesture = (hand: any) => {
+    if (!hand || hand.length < 21) return false;
+    const dist = (a: any, b: any) => Math.sqrt(
+        Math.pow(a.x - b.x, 2) +
+        Math.pow(a.y - b.y, 2) +
+        Math.pow(a.z - b.z, 2)
+    );
+    const palmSize = dist(hand[0], hand[9]) || 1;
+    const pinch = dist(hand[4], hand[8]) < palmSize * 0.35;
+    const middleExtended = hand[12].y < hand[10].y;
+    const ringExtended = hand[16].y < hand[14].y;
+    const pinkyExtended = hand[20].y < hand[18].y;
+    return pinch && middleExtended && ringExtended && pinkyExtended;
+  };
+
+  const updateOkHold = (isOk: boolean) => {
+    if (currentWorldRef.current !== 'A' || worldBUnlockedRef.current || !deepZoneActiveRef.current || !isOk) {
+        resetOkHold();
+        return;
+    }
+
+    const now = performance.now();
+    if (!okHoldStartRef.current) {
+        okHoldStartRef.current = now;
+    }
+    const elapsed = now - okHoldStartRef.current;
+    const progress = Math.min(elapsed / OK_HOLD_MS, 1);
+    if (progress !== okHoldProgressRef.current) {
+        setOkProgress(progress);
+    }
+    if (progress >= 1) {
+        unlockWorldB();
+        switchWorld('B');
+    }
+  };
+
   // --- Hand Tracking Logic ---
 
   useEffect(() => {
@@ -71,18 +438,22 @@ export function App() {
 
     let handsInstance: any = null;
     let cameraInstance: any = null;
+    let isActive = true;
 
     const onResults = (results: Results) => {
-        if (!controlsRef.current || !cameraRef.current) return;
+        if (!isActive || !controlsRef.current || !cameraRef.current) return;
 
-        // 1. Filter for Right Hand Only
+        // 1. Resolve Right/Left Hands
         let rightHandIndex = -1;
+        let leftHandIndex = -1;
         if (results.multiHandedness) {
             for (let i = 0; i < results.multiHandedness.length; i++) {
                 // In selfieMode=true, "Right" label corresponds to the user's actual Right hand
                 if (results.multiHandedness[i].label === 'Right') {
                     rightHandIndex = i;
-                    break;
+                }
+                if (results.multiHandedness[i].label === 'Left') {
+                    leftHandIndex = i;
                 }
             }
         }
@@ -160,15 +531,16 @@ export function App() {
 
             // Distance Check to prevent clipping or getting lost
             const distToTarget = cameraObj.position.distanceTo(controlsRef.current.target);
+            const maxZoomDistance = getWorldMaxZoomDistance(currentWorldRef.current);
 
             if (dist < ZOOM_IN_THRESHOLD) {
                 // Close pinch = Zoom In (Move forward)
-                if (distToTarget > 50) { // Min distance limit
+                if (distToTarget > MIN_ZOOM_DISTANCE) { // Min distance limit
                      cameraObj.position.addScaledVector(viewDirection, zoomSpeed);
                 }
             } else if (dist > ZOOM_OUT_THRESHOLD) {
                 // Open spread = Zoom Out (Move backward)
-                if (distToTarget < 2000) { // Max distance limit
+                if (distToTarget < maxZoomDistance) { // Max distance limit
                     cameraObj.position.addScaledVector(viewDirection, -zoomSpeed);
                 }
             }
@@ -182,6 +554,12 @@ export function App() {
             handVelocity.current = { x: 0, y: 0 };
             lastHandTs.current = null;
         }
+
+        const leftHand = leftHandIndex !== -1 && landmarks && landmarks[leftHandIndex]
+            ? landmarks[leftHandIndex]
+            : null;
+        const okDetected = leftHand ? isOkGesture(leftHand) : false;
+        updateOkHold(okDetected);
     };
 
     const initMediaPipe = async () => {
@@ -212,9 +590,8 @@ export function App() {
                 }
                 cameraInstance = new MPCamera(videoRef.current, {
                     onFrame: async () => {
-                        if (videoRef.current && handsInstance) {
-                            await handsInstance.send({ image: videoRef.current });
-                        }
+                        if (!isActive || !videoRef.current || !handsInstance) return;
+                        await handsInstance.send({ image: videoRef.current });
                     },
                     width: 320,
                     height: 240
@@ -230,8 +607,16 @@ export function App() {
     initMediaPipe();
 
     return () => {
-        if (cameraInstance) cameraInstance.stop();
-        if (handsInstance) handsInstance.close();
+      isActive = false;
+      if (cameraInstance) {
+          cameraInstance.stop();
+          cameraInstance = null;
+      }
+      if (handsInstance) {
+          const instance = handsInstance;
+          handsInstance = null;
+          instance.close();
+      }
     };
   }, [handControlEnabled]);
 
@@ -250,6 +635,7 @@ export function App() {
     sceneRef.current = null;
     materialRef.current = null;
     composerRef.current = null;
+    pointsRef.current = null;
   };
 
   const initScene = useCallback((textureUrl: string) => {
@@ -289,6 +675,22 @@ export function App() {
     controls.enableZoom = true;
     controlsRef.current = controls;
 
+    const initialView: ViewState = {
+        position: camera.position.clone(),
+        target: controls.target.clone(),
+    };
+    defaultViewRef.current = initialView;
+    worldAViewRef.current = cloneViewState(initialView);
+    worldBVisitedRef.current = false;
+    worldBViewRef.current = null;
+    worldBReturnDistanceRef.current = null;
+    worldBReturnArmedRef.current = false;
+    worldBEntryArmedRef.current = false;
+    defaultMaxDistanceRef.current = camera.position.distanceTo(controls.target);
+    controls.minDistance = MIN_ZOOM_DISTANCE;
+    controls.maxDistance = MAX_ZOOM_DISTANCE;
+    initialAGrowthCompletedRef.current = false;
+
     // Texture Loading
     const loader = new THREE.TextureLoader();
     loader.crossOrigin = 'anonymous';
@@ -297,18 +699,9 @@ export function App() {
         textureUrl, 
         (texture) => {
             // Success Callback
-            const imgWidth = texture.image.width;
-            const imgHeight = texture.image.height;
-            
-            const maxDim = 600; 
-            let rw = imgWidth, rh = imgHeight;
-            if(imgWidth > maxDim || imgHeight > maxDim) {
-                const aspect = imgWidth / imgHeight;
-                if(imgWidth > imgHeight) { rw = maxDim; rh = maxDim / aspect; }
-                else { rh = maxDim; rw = maxDim * aspect; }
-            }
-
-            const geometry = new THREE.PlaneGeometry(rw, rh, Math.floor(rw), Math.floor(rh));
+            applyTextureOrientation(texture, textureUrl);
+            textureCacheRef.current[textureUrl] = texture;
+            const geometry = buildGeometryFromTexture(texture);
 
             const material = new THREE.ShaderMaterial({
                 uniforms: {
@@ -333,6 +726,7 @@ export function App() {
             const mesh = new THREE.Points(geometry, material);
             mesh.rotation.x = -Math.PI / 1.6;
             scene.add(mesh);
+            pointsRef.current = mesh;
 
             // Post Processing
             const renderScene = new RenderPass(scene, camera);
@@ -358,6 +752,40 @@ export function App() {
                 // Also update damping
                 controls.update();
 
+                const distToTarget = camera.position.distanceTo(controls.target);
+                const isDeepZone = distToTarget <= DEEP_ZONE_DISTANCE;
+                if (isDeepZone !== deepZoneActiveRef.current) {
+                    deepZoneActiveRef.current = isDeepZone;
+                    if (isDeepZone && !deepZoneReachedRef.current) {
+                        deepZoneReachedRef.current = true;
+                        setDeepZoneReached(true);
+                    }
+                    if (!isDeepZone) {
+                        resetOkHold();
+                    }
+                }
+
+                const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                if (currentWorldRef.current === 'B') {
+                    const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                    if (!worldBReturnArmedRef.current && distToTarget < armDistance) {
+                        worldBReturnArmedRef.current = true;
+                    }
+                    if (worldBReturnArmedRef.current && distToTarget >= returnDistance) {
+                        switchWorld('A');
+                    }
+                }
+
+                if (currentWorldRef.current === 'A' && worldBUnlockedRef.current) {
+                    const reenterDistance = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN;
+                    if (!worldBEntryArmedRef.current && distToTarget > reenterDistance) {
+                        worldBEntryArmedRef.current = true;
+                    }
+                    if (worldBEntryArmedRef.current && isDeepZone) {
+                        switchWorld('B');
+                    }
+                }
+
                 if (materialRef.current) {
                     materialRef.current.uniforms.uTime.value = elapsedTime;
                     materialRef.current.uniforms.uDisplacementStrength.value = paramsRef.current.displacement;
@@ -372,12 +800,16 @@ export function App() {
 
                     if (animatingRef.current) {
                         const currentGrowth = materialRef.current.uniforms.uGrowth.value;
-                        if (currentGrowth < MAX_GROWTH) { 
-                            materialRef.current.uniforms.uGrowth.value += paramsRef.current.growthSpeed;
-                            setGrowth(materialRef.current.uniforms.uGrowth.value);
-                        } else {
+                        const nextGrowth = Math.min(currentGrowth + paramsRef.current.growthSpeed, MAX_GROWTH);
+                        materialRef.current.uniforms.uGrowth.value = nextGrowth;
+                        setGrowth(nextGrowth);
+                        syncGrowthRef(nextGrowth);
+                        if (nextGrowth >= MAX_GROWTH) {
                             animatingRef.current = false;
                             setAnimating(false);
+                            if (currentWorldRef.current === 'A') {
+                                initialAGrowthCompletedRef.current = true;
+                            }
                         }
                     }
                 }
@@ -392,11 +824,19 @@ export function App() {
             setAnimating(true);
             setGrowth(0);
             setLoading(false);
+            const preloadTarget = currentWorldRef.current === 'A' ? worldBImageRef.current : worldAImageRef.current;
+            preloadTexture(preloadTarget);
         },
         undefined, // onProgress
         (err) => {
-            if (textureUrl === DEFAULT_IMAGE) {
+            const isDefaultTexture = textureUrl === DEFAULT_IMAGE || textureUrl === WORLD_B_IMAGE;
+            if (isDefaultTexture) {
                  console.warn(`Default image at ${DEFAULT_IMAGE} failed to load. Falling back.`);
+                 if (currentWorldRef.current === 'A') {
+                     worldAImageRef.current = FALLBACK_IMAGE;
+                 } else {
+                     worldBImageRef.current = FALLBACK_IMAGE;
+                 }
                  setImageSrc(FALLBACK_IMAGE);
                  return;
             }
@@ -420,7 +860,7 @@ export function App() {
         window.removeEventListener('resize', handleResize);
     };
 
-  }, []);
+  }, [buildGeometryFromTexture, preloadTexture]);
 
   useEffect(() => {
      if (!imageSrc) {
@@ -442,7 +882,7 @@ export function App() {
       const reader = new FileReader();
       reader.onload = (event) => {
         if (event.target?.result) {
-            setImageSrc(event.target.result as string);
+            setWorldImage(event.target.result as string);
         }
       };
       reader.onerror = () => {
@@ -457,6 +897,10 @@ export function App() {
       if(materialRef.current) {
           materialRef.current.uniforms.uGrowth.value = 0.0;
           setGrowth(0);
+          syncGrowthRef(0);
+          if (currentWorldRef.current === 'A') {
+              initialAGrowthCompletedRef.current = false;
+          }
           animatingRef.current = true;
           setAnimating(true);
       }
@@ -466,6 +910,7 @@ export function App() {
       animatingRef.current = false;
       setAnimating(false);
       setGrowth(val);
+      syncGrowthRef(val);
       if(materialRef.current) {
           materialRef.current.uniforms.uGrowth.value = val;
       }
@@ -512,7 +957,7 @@ export function App() {
               <input type="file" className="hidden" accept="image/*" onChange={handleFileUpload} />
             </label>
             <div className="mt-4">
-                 <button onClick={() => setImageSrc(DEFAULT_IMAGE)} className="text-xs text-neutral-500 hover:text-white underline">
+                 <button onClick={handleDemoImage} className="text-xs text-neutral-500 hover:text-white underline">
                      Try Demo Image
                  </button>
             </div>
@@ -567,6 +1012,59 @@ export function App() {
                 </div>
             </div>
 
+            <div className="absolute bottom-6 left-6 z-10 w-80 pointer-events-auto">
+                <div className="bg-neutral-950/80 backdrop-blur-md border border-neutral-800 rounded-xl p-6 shadow-2xl">
+                    <div className="flex items-center gap-2 mb-4 text-emerald-400 border-b border-neutral-800 pb-2">
+                        <span className="text-xs font-bold tracking-widest uppercase">Mission</span>
+                    </div>
+
+                    <div className="space-y-4 text-xs text-neutral-300">
+                        <div className="flex items-start gap-3">
+                            <span className={`mt-1 inline-block h-2 w-2 rounded-full ${deepZoneReached ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                            <div className="flex-1">
+                                <div className={`text-[11px] ${deepZoneReached ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                    Task 1: Enter the deep zone
+                                </div>
+                                <div className="text-[10px] text-neutral-500">Zoom into the deepest area to unlock the gate.</div>
+                            </div>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                            <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldBUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                            <div className="flex-1">
+                                <div className={`text-[11px] ${worldBUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                    Task 2: Left-hand OK for 3 seconds
+                                </div>
+                                {!worldBUnlocked && (
+                                    <div className="mt-2">
+                                        <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
+                                            <span>Confirm progress</span>
+                                            <span>{Math.round(okHoldProgress * 100)}%</span>
+                                        </div>
+                                        <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
+                                            <div
+                                                className="h-full bg-emerald-500 transition-[width] duration-150"
+                                                style={{ width: `${Math.round(okHoldProgress * 100)}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                                {worldBUnlocked && (
+                                    <div className="text-[10px] text-emerald-400 mt-1">World B unlocked</div>
+                                )}
+                            </div>
+                        </div>
+
+                        {!worldBUnlocked && !handControlEnabled && (
+                            <div className="text-[10px] text-neutral-500">Tip: enable hand control to confirm.</div>
+                        )}
+                        {currentWorld === 'B' && (
+                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World A.</div>
+                        )}
+                    </div>
+                </div>
+            </div>
+
             <div className="absolute bottom-6 right-6 z-10 w-80 pointer-events-auto">
                 <div className="bg-neutral-950/80 backdrop-blur-md border border-neutral-800 rounded-xl p-6 shadow-2xl">
                     <div className="flex items-center gap-2 mb-4 text-emerald-400 border-b border-neutral-800 pb-2">
@@ -581,9 +1079,9 @@ export function App() {
                                     <Hand className="w-3 h-3" />
                                     <span className="font-bold">Right Hand Active</span>
                                 </div>
-                                <span className="opacity-70 pl-5">â€?Move hand to pan</span>
-                                <span className="opacity-70 pl-5">â€?Pinch close: Zoom In</span>
-                                <span className="opacity-70 pl-5">â€?Pinch open: Zoom Out</span>
+                                <span className="opacity-70 pl-5">ï¿½?Move hand to pan</span>
+                                <span className="opacity-70 pl-5">ï¿½?Pinch close: Zoom In</span>
+                                <span className="opacity-70 pl-5">ï¿½?Pinch open: Zoom Out</span>
                              </div>
                          )}
 
