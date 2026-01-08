@@ -1,0 +1,7 @@
+{
+  "name": "Physarum Growth Particle System",
+  "description": "A 3D particle visualization that simulates organic Physarum growth from the center of an image outwards.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
