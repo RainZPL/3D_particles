@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 import { vertexShader, fragmentShader } from './shaders';
 import { Camera, RefreshCcw, Upload, Settings, AlertCircle, Hand, Video, VideoOff } from 'lucide-react';
 // Import MediaPipe safely handling ESM export variations
@@ -19,6 +20,7 @@ const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Ca
 // Use a simple relative path. The file should be in the public root.
 const DEFAULT_IMAGE = "/A.png";
 const WORLD_B_IMAGE = "/B.png";
+const WORLD_C_MODEL = "/C.glb";
 const MIN_ZOOM_DISTANCE = 50;
 const MAX_ZOOM_DISTANCE = 2000;
 const DEEP_ZONE_DISTANCE = 70;
@@ -26,7 +28,15 @@ const RETURN_ZONE_DISTANCE = 220;
 const RETURN_MARGIN = 60;
 const RETURN_ARM_MARGIN = 10;
 const REENTER_ARM_MARGIN = 20;
+const REENTER_ARM_MARGIN_C = 20;
 const WORLD_B_MAX_DISTANCE_FACTOR = 1.1;
+const WORLD_C_MAX_DISTANCE_FACTOR = 1.1;
+const REENTER_ARM_MARGIN_D = 20;
+const WORLD_D_MAX_DISTANCE_FACTOR = 1.05;
+const WORLD_D_ROTATE_REQUIRED = 1.5;
+const WORLD_D_FIST_THRESHOLD = 0.5;
+const WORLD_D_STRESS_HOLD_MS = 3000;
+const WORLD_D_PARTICLE_COUNT = 600;
 const OK_HOLD_MS = 3000;
 
 // Fallback in case A.png is missing
@@ -47,16 +57,41 @@ export function App() {
   const [animating, setAnimating] = useState(false);
   const animatingRef = useRef(false); 
   const [growth, setGrowth] = useState(0);
-  const [currentWorld, setCurrentWorld] = useState<'A' | 'B'>('A');
+  const [currentWorld, setCurrentWorld] = useState<'A' | 'B' | 'C' | 'D'>('A');
   const [worldBUnlocked, setWorldBUnlocked] = useState(false);
+  const [worldCUnlocked, setWorldCUnlocked] = useState(false);
+  const [worldDUnlocked, setWorldDUnlocked] = useState(false);
   const [deepZoneReached, setDeepZoneReached] = useState(false);
+  const [deepZoneReachedB, setDeepZoneReachedB] = useState(false);
+  const [deepZoneReachedC, setDeepZoneReachedC] = useState(false);
   const [okHoldProgress, setOkHoldProgress] = useState(0);
-  const currentWorldRef = useRef<'A' | 'B'>('A');
+  const [okHoldProgressC, setOkHoldProgressC] = useState(0);
+  const [okHoldProgressD, setOkHoldProgressD] = useState(0);
+  const [worldDRotationProgress, setWorldDRotationProgress] = useState(0);
+  const [worldDStressProgress, setWorldDStressProgress] = useState(0);
+  const [worldDStressActive, setWorldDStressActive] = useState(false);
+  const [, setWorldCLoading] = useState(false);
+  const currentWorldRef = useRef<'A' | 'B' | 'C' | 'D'>('A');
   const worldBUnlockedRef = useRef(false);
+  const worldCUnlockedRef = useRef(false);
+  const worldDUnlockedRef = useRef(false);
   const deepZoneActiveRef = useRef(false);
   const deepZoneReachedRef = useRef(false);
+  const deepZoneReachedBRef = useRef(false);
+  const deepZoneReachedCRef = useRef(false);
   const okHoldStartRef = useRef<number | null>(null);
   const okHoldProgressRef = useRef(0);
+  const okHoldStartCRef = useRef<number | null>(null);
+  const okHoldProgressCRef = useRef(0);
+  const okHoldStartDRef = useRef<number | null>(null);
+  const okHoldProgressDRef = useRef(0);
+  const worldDLastWristAngleRef = useRef<number | null>(null);
+  const worldDRotationAccumRef = useRef(0);
+  const worldDRotationProgressRef = useRef(0);
+  const worldDStressHoldStartRef = useRef<number | null>(null);
+  const worldDStressHoldProgressRef = useRef(0);
+  const worldDStressActiveRef = useRef(false);
+  const worldDFistStrengthRef = useRef(0);
   const worldAImageRef = useRef<string | null>(DEFAULT_IMAGE);
   const worldBImageRef = useRef<string | null>(WORLD_B_IMAGE);
 
@@ -77,16 +112,41 @@ export function App() {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const pointsRef = useRef<THREE.Points | null>(null);
+  const worldCModelRef = useRef<THREE.Group | null>(null);
+  const worldCLoadingRef = useRef<Promise<THREE.Group> | null>(null);
+  const worldCReadyRef = useRef(false);
+  const worldCPendingRef = useRef(false);
+  const worldCLightsRef = useRef<THREE.Light[] | null>(null);
+  const worldDGroupRef = useRef<THREE.Group | null>(null);
+  const worldDTopRef = useRef<THREE.Mesh | null>(null);
+  const worldDBottomRef = useRef<THREE.Mesh | null>(null);
+  const worldDGrooveRef = useRef<THREE.Mesh | null>(null);
+  const worldDParticlesRef = useRef<THREE.Points | null>(null);
+  const worldDParticleDataRef = useRef<{ positions: Float32Array; velocities: Float32Array; basePositions: Float32Array } | null>(null);
+  const worldDMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const worldDGrooveMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const worldDLightsRef = useRef<THREE.Light[] | null>(null);
+  const worldDReadyRef = useRef(false);
   const textureCacheRef = useRef<Record<string, THREE.Texture>>({});
   const textureLoadingRef = useRef<Record<string, Promise<THREE.Texture>>>({});
   const textureLoaderRef = useRef<THREE.TextureLoader | null>(null);
   const defaultViewRef = useRef<ViewState | null>(null);
   const worldAViewRef = useRef<ViewState | null>(null);
   const worldBViewRef = useRef<ViewState | null>(null);
+  const worldCViewRef = useRef<ViewState | null>(null);
+  const worldDViewRef = useRef<ViewState | null>(null);
+  const worldCVisitedRef = useRef(false);
+  const worldDVisitedRef = useRef(false);
   const worldBVisitedRef = useRef(false);
   const worldBReturnDistanceRef = useRef<number | null>(null);
   const worldBReturnArmedRef = useRef(false);
   const worldBEntryArmedRef = useRef(false);
+  const worldCEntryArmedRef = useRef(false);
+  const worldCReturnDistanceRef = useRef<number | null>(null);
+  const worldCReturnArmedRef = useRef(false);
+  const worldDEntryArmedRef = useRef(false);
+  const worldDReturnDistanceRef = useRef<number | null>(null);
+  const worldDReturnArmedRef = useRef(false);
   const worldAGrowthRef = useRef(0);
   const worldBGrowthRef = useRef(MAX_GROWTH);
   const defaultMaxDistanceRef = useRef<number | null>(null);
@@ -230,7 +290,268 @@ export function App() {
     }
   }, [applyTextureToScene, loadTexture]);
 
-  const cloneViewState = (state: ViewState) => ({
+  const ensureWorldCLights = useCallback(() => {
+    if (!sceneRef.current) return;
+    if (worldCLightsRef.current) return;
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x080820, 0.9);
+    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+    dir.position.set(6, 10, 8);
+    hemi.visible = false;
+    dir.visible = false;
+    sceneRef.current.add(hemi, dir);
+    worldCLightsRef.current = [hemi, dir];
+  }, []);
+
+  const fitWorldCModel = useCallback((model: THREE.Object3D) => {
+    const box = new THREE.Box3().setFromObject(model);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const target = 320;
+    const scale = target / maxDim;
+    model.scale.setScalar(scale);
+    box.setFromObject(model);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    model.position.sub(center);
+  }, []);
+
+  const loadWorldCModel = useCallback(() => {
+    if (worldCReadyRef.current && worldCModelRef.current) {
+      return Promise.resolve(worldCModelRef.current);
+    }
+    if (worldCLoadingRef.current) {
+      return worldCLoadingRef.current;
+    }
+    if (!sceneRef.current) {
+      return Promise.reject(new Error("Scene not ready"));
+    }
+    setWorldCLoading(true);
+    const loader = new GLTFLoader();
+    const promise = new Promise<THREE.Group>((resolve, reject) => {
+      loader.load(
+        WORLD_C_MODEL,
+        (gltf) => {
+          ensureWorldCLights();
+          const model = gltf.scene;
+          fitWorldCModel(model);
+          model.visible = false;
+          sceneRef.current.add(model);
+          worldCModelRef.current = model;
+          worldCReadyRef.current = true;
+          worldCLoadingRef.current = null;
+          setWorldCLoading(false);
+          resolve(model);
+        },
+        undefined,
+        (err) => {
+          worldCLoadingRef.current = null;
+          setWorldCLoading(false);
+          reject(err);
+        }
+      );
+    });
+    worldCLoadingRef.current = promise;
+    return promise;
+  }, [ensureWorldCLights, fitWorldCModel]);
+
+  const preloadWorldCModel = useCallback(() => {
+    void loadWorldCModel().catch((err) => {
+      console.warn("Failed to preload World C model", err);
+    });
+  }, [loadWorldCModel]);
+
+  const setWorldVisibility = (world: 'A' | 'B' | 'C' | 'D') => {
+    if (pointsRef.current) {
+      pointsRef.current.visible = world === 'A' || world === 'B';
+    }
+    if (worldCModelRef.current) {
+      worldCModelRef.current.visible = world === 'C';
+    }
+    if (worldDGroupRef.current) {
+      worldDGroupRef.current.visible = world === 'D';
+    }
+    if (worldCLightsRef.current) {
+      worldCLightsRef.current.forEach((light) => {
+        light.visible = world === 'C';
+      });
+    }
+    if (worldDLightsRef.current) {
+      worldDLightsRef.current.forEach((light) => {
+        light.visible = world === 'D';
+      });
+    }
+  };
+
+  const enterWorldC = () => {
+    if (worldCReadyRef.current) {
+      switchWorld('C');
+      return;
+    }
+    worldCPendingRef.current = true;
+    setWorldCLoading(true);
+    void loadWorldCModel()
+      .then(() => {
+        if (!worldCPendingRef.current) return;
+        worldCPendingRef.current = false;
+        setWorldCLoading(false);
+        if (currentWorldRef.current === 'B') {
+          switchWorld('C');
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to load World C model", err);
+        worldCPendingRef.current = false;
+        setWorldCLoading(false);
+      });
+  };
+
+  const ensureWorldDLights = useCallback(() => {
+    if (!sceneRef.current) return;
+    if (worldDLightsRef.current) return;
+    const ambient = new THREE.AmbientLight(0xffffff, 0.45);
+    const key = new THREE.DirectionalLight(0xffffff, 1.2);
+    key.position.set(8, 12, 6);
+    const rim = new THREE.DirectionalLight(0x9fdfff, 0.6);
+    rim.position.set(-8, -10, 10);
+    ambient.visible = false;
+    key.visible = false;
+    rim.visible = false;
+    sceneRef.current.add(ambient, key, rim);
+    worldDLightsRef.current = [ambient, key, rim];
+  }, []);
+
+  const buildWorldDParticles = useCallback((group: THREE.Group) => {
+    const count = WORLD_D_PARTICLE_COUNT;
+    const positions = new Float32Array(count * 3);
+    const basePositions = new Float32Array(count * 3);
+    const velocities = new Float32Array(count * 3);
+    const baseRadius = 230;
+    const radiusJitter = 80;
+    for (let i = 0; i < count; i++) {
+      const offset = i * 3;
+      const dir = new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1);
+      dir.normalize();
+      const radius = baseRadius + Math.random() * radiusJitter;
+      const pos = dir.multiplyScalar(radius);
+      positions[offset] = pos.x;
+      positions[offset + 1] = pos.y;
+      positions[offset + 2] = pos.z;
+      basePositions[offset] = pos.x;
+      basePositions[offset + 1] = pos.y;
+      basePositions[offset + 2] = pos.z;
+      velocities[offset] = 0;
+      velocities[offset + 1] = 0;
+      velocities[offset + 2] = 0;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.PointsMaterial({
+      color: 0xaefcff,
+      size: 2.2,
+      transparent: true,
+      opacity: 0.6,
+      depthWrite: false,
+    });
+    const particles = new THREE.Points(geometry, material);
+    group.add(particles);
+    worldDParticlesRef.current = particles;
+    worldDParticleDataRef.current = { positions, velocities, basePositions };
+  }, []);
+
+  const ensureWorldDModel = useCallback(() => {
+    if (worldDReadyRef.current) return;
+    if (!sceneRef.current) return;
+    ensureWorldDLights();
+    const group = new THREE.Group();
+    group.visible = false;
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+      color: 0xdedede,
+      roughness: 0.85,
+      metalness: 0.05,
+    });
+    const grooveMaterial = new THREE.MeshStandardMaterial({
+      color: 0x8a8a8a,
+      roughness: 0.9,
+      metalness: 0.02,
+      emissive: new THREE.Color(0x111111),
+      emissiveIntensity: 0.4,
+    });
+    const radius = 120;
+    const sphereGeometry = new THREE.SphereGeometry(radius, 64, 64);
+    const top = new THREE.Mesh(sphereGeometry, bodyMaterial);
+    const bottom = new THREE.Mesh(sphereGeometry, bodyMaterial);
+    top.position.y = radius * 0.42;
+    bottom.position.y = -radius * 0.42;
+    top.userData.baseY = top.position.y;
+    bottom.userData.baseY = bottom.position.y;
+    const grooveGeometry = new THREE.TorusGeometry(radius * 0.92, radius * 0.08, 16, 80);
+    const groove = new THREE.Mesh(grooveGeometry, grooveMaterial);
+    groove.rotation.x = Math.PI / 2;
+    const topSpikeGroup = new THREE.Group();
+    const bottomSpikeGroup = new THREE.Group();
+    const spikeBaseHeight = 10;
+    const spikeGeometry = new THREE.ConeGeometry(3.5, spikeBaseHeight, 8);
+    const spikeMaterial = new THREE.MeshStandardMaterial({
+      color: 0xf2f2f2,
+      roughness: 0.9,
+      metalness: 0.05,
+    });
+    const spikeCount = 180;
+    const spikesPerHemisphere = Math.floor(spikeCount / 2);
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    const minHemisphereY = 0.2;
+    const normal = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+
+    for (let i = 0; i < spikesPerHemisphere; i++) {
+      const t = (i + 0.5) / spikesPerHemisphere;
+      const y = minHemisphereY + (1 - minHemisphereY) * t;
+      const radiusXZ = Math.sqrt(Math.max(0, 1 - y * y));
+      const theta = goldenAngle * i;
+      normal.set(Math.cos(theta) * radiusXZ, y, Math.sin(theta) * radiusXZ);
+      const height = spikeBaseHeight * (0.85 + 0.3 * ((i % 7) / 6));
+      const cone = new THREE.Mesh(spikeGeometry, spikeMaterial);
+      cone.scale.set(1, height / spikeBaseHeight, 1);
+      cone.position.copy(normal).multiplyScalar(radius + height * 0.5);
+      cone.quaternion.setFromUnitVectors(up, normal);
+      topSpikeGroup.add(cone);
+    }
+
+    for (let i = 0; i < spikesPerHemisphere; i++) {
+      const t = (i + 0.5) / spikesPerHemisphere;
+      const y = -(minHemisphereY + (1 - minHemisphereY) * t);
+      const radiusXZ = Math.sqrt(Math.max(0, 1 - y * y));
+      const theta = goldenAngle * (i + spikesPerHemisphere * 0.5);
+      normal.set(Math.cos(theta) * radiusXZ, y, Math.sin(theta) * radiusXZ);
+      const height = spikeBaseHeight * (0.85 + 0.3 * ((i % 7) / 6));
+      const cone = new THREE.Mesh(spikeGeometry, spikeMaterial);
+      cone.scale.set(1, height / spikeBaseHeight, 1);
+      cone.position.copy(normal).multiplyScalar(radius + height * 0.5);
+      cone.quaternion.setFromUnitVectors(up, normal);
+      bottomSpikeGroup.add(cone);
+    }
+
+    top.add(topSpikeGroup);
+    bottom.add(bottomSpikeGroup);
+    group.add(top, bottom, groove);
+    buildWorldDParticles(group);
+    sceneRef.current.add(group);
+    worldDGroupRef.current = group;
+    worldDTopRef.current = top;
+    worldDBottomRef.current = bottom;
+    worldDGrooveRef.current = groove;
+    worldDMaterialRef.current = bodyMaterial;
+    worldDGrooveMaterialRef.current = grooveMaterial;
+    worldDReadyRef.current = true;
+  }, [buildWorldDParticles, ensureWorldDLights]);
+
+  const enterWorldD = () => {
+    ensureWorldDModel();
+    switchWorld('D');
+  };
+
+const cloneViewState = (state: ViewState) => ({
     position: state.position.clone(),
     target: state.target.clone(),
   });
@@ -253,7 +574,7 @@ export function App() {
   const syncGrowthRef = (value: number) => {
     if (currentWorldRef.current === 'A') {
       worldAGrowthRef.current = value;
-    } else {
+    } else if (currentWorldRef.current === 'B') {
       worldBGrowthRef.current = value;
     }
   };
@@ -271,14 +592,20 @@ export function App() {
     }
   };
 
-  const getWorldMaxZoomDistance = (world: 'A' | 'B') => {
+  const getWorldMaxZoomDistance = (world: 'A' | 'B' | 'C' | 'D') => {
     if (world === 'B') {
       return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_B_MAX_DISTANCE_FACTOR;
+    }
+    if (world === 'C') {
+      return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_C_MAX_DISTANCE_FACTOR;
+    }
+    if (world === 'D') {
+      return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_D_MAX_DISTANCE_FACTOR;
     }
     return MAX_ZOOM_DISTANCE;
   };
 
-  const applyZoomLimits = (world: 'A' | 'B') => {
+  const applyZoomLimits = (world: 'A' | 'B' | 'C' | 'D') => {
     if (!controlsRef.current) return;
     controlsRef.current.minDistance = MIN_ZOOM_DISTANCE;
     controlsRef.current.maxDistance = getWorldMaxZoomDistance(world);
@@ -291,13 +618,31 @@ export function App() {
     worldBReturnDistanceRef.current = Math.min(distToTarget + RETURN_MARGIN, maxDistance);
   };
 
+  const updateWorldCReturnDistance = () => {
+    if (!cameraRef.current || !controlsRef.current) return;
+    const distToTarget = cameraRef.current.position.distanceTo(controlsRef.current.target);
+    const maxDistance = getWorldMaxZoomDistance('C');
+    worldCReturnDistanceRef.current = Math.min(distToTarget + RETURN_MARGIN, maxDistance);
+  };
+
+  const updateWorldDReturnDistance = () => {
+    if (!cameraRef.current || !controlsRef.current) return;
+    const distToTarget = cameraRef.current.position.distanceTo(controlsRef.current.target);
+    const maxDistance = getWorldMaxZoomDistance('D');
+    worldDReturnDistanceRef.current = Math.min(distToTarget + RETURN_MARGIN, maxDistance);
+  };
+
   const snapshotCurrentWorld = () => {
     const viewState = captureViewState();
     if (viewState) {
       if (currentWorldRef.current === 'A') {
         worldAViewRef.current = viewState;
-      } else {
+      } else if (currentWorldRef.current === 'B') {
         worldBViewRef.current = viewState;
+      } else if (currentWorldRef.current === 'C') {
+        worldCViewRef.current = viewState;
+      } else {
+        worldDViewRef.current = viewState;
       }
     }
     syncGrowthRef(growth);
@@ -315,14 +660,59 @@ export function App() {
     }
   };
 
+  const setOkProgressC = (progress: number) => {
+    okHoldProgressCRef.current = progress;
+    setOkHoldProgressC(progress);
+  };
+
+  const setOkProgressD = (progress: number) => {
+    okHoldProgressDRef.current = progress;
+    setOkHoldProgressD(progress);
+  };
+
+  const resetOkHoldC = () => {
+    okHoldStartCRef.current = null;
+    if (okHoldProgressCRef.current !== 0) {
+        setOkProgressC(0);
+    }
+  };
+
+  const resetOkHoldD = () => {
+    okHoldStartDRef.current = null;
+    if (okHoldProgressDRef.current !== 0) {
+        setOkProgressD(0);
+    }
+  };
+
   const unlockWorldB = () => {
     if (worldBUnlockedRef.current) return;
     worldBUnlockedRef.current = true;
     setWorldBUnlocked(true);
   };
 
-  const switchWorld = (nextWorld: 'A' | 'B') => {
+  const unlockWorldC = () => {
+    if (worldCUnlockedRef.current) return;
+    worldCUnlockedRef.current = true;
+    setWorldCUnlocked(true);
+  };
+
+  const unlockWorldD = () => {
+    if (worldDUnlockedRef.current) return;
+    worldDUnlockedRef.current = true;
+    setWorldDUnlocked(true);
+  };
+
+  const switchWorld = (nextWorld: 'A' | 'B' | 'C' | 'D') => {
     if (currentWorldRef.current === nextWorld) return;
+    const previousWorld = currentWorldRef.current;
+
+    if (nextWorld === 'C' && !worldCReadyRef.current) {
+        enterWorldC();
+        return;
+    }
+    if (nextWorld === 'D' && !worldDReadyRef.current) {
+        ensureWorldDModel();
+    }
 
     snapshotCurrentWorld();
 
@@ -333,13 +723,28 @@ export function App() {
 
     currentWorldRef.current = nextWorld;
     setCurrentWorld(nextWorld);
-    const nextImage = nextWorld === 'A' ? worldAImageRef.current : worldBImageRef.current;
-    if (nextImage) {
-        const isDefaultTexture = nextImage === DEFAULT_IMAGE || nextImage === WORLD_B_IMAGE;
-        void swapTexture(nextImage, { resetGrowth: false, isDefault: isDefaultTexture });
-        const preloadTarget = nextWorld === 'A' ? worldBImageRef.current : worldAImageRef.current;
-        preloadTexture(preloadTarget);
+    if (previousWorld === 'D' && nextWorld !== 'D') {
+        worldDStressActiveRef.current = false;
+        worldDStressHoldStartRef.current = null;
+        worldDStressHoldProgressRef.current = 0;
+        setWorldDStressProgress(0);
+        setWorldDStressActive(false);
+        worldDFistStrengthRef.current = 0;
+        worldDLastWristAngleRef.current = null;
     }
+    if (nextWorld === 'A' || nextWorld === 'B') {
+        const nextImage = nextWorld === 'A' ? worldAImageRef.current : worldBImageRef.current;
+        if (nextImage) {
+            const isDefaultTexture = nextImage === DEFAULT_IMAGE || nextImage === WORLD_B_IMAGE;
+            void swapTexture(nextImage, { resetGrowth: false, isDefault: isDefaultTexture });
+            const preloadTarget = nextWorld === 'A' ? worldBImageRef.current : worldAImageRef.current;
+            preloadTexture(preloadTarget);
+            preloadWorldCModel();
+            ensureWorldDModel();
+        }
+    }
+
+    setWorldVisibility(nextWorld);
 
     if (nextWorld === 'B') {
         if (!worldBVisitedRef.current) {
@@ -364,6 +769,57 @@ export function App() {
         setGrowthInstant(MAX_GROWTH);
         updateWorldBReturnDistance();
         worldBReturnArmedRef.current = false;
+        worldCEntryArmedRef.current = false;
+    } else if (nextWorld === 'C') {
+        if (!worldCVisitedRef.current) {
+            worldCVisitedRef.current = true;
+            if (defaultViewRef.current) {
+                const initialView = cloneViewState(defaultViewRef.current);
+                const maxDistance = getWorldMaxZoomDistance('C');
+                const offset = initialView.position.clone().sub(initialView.target);
+                const currentDistance = offset.length();
+                if (currentDistance > 0) {
+                    offset.setLength(maxDistance);
+                    initialView.position.copy(initialView.target).add(offset);
+                }
+                worldCViewRef.current = initialView;
+                applyViewState(initialView);
+            }
+        } else if (worldCViewRef.current) {
+            applyViewState(worldCViewRef.current);
+        }
+        updateWorldCReturnDistance();
+        worldCReturnArmedRef.current = false;
+        worldDEntryArmedRef.current = false;
+    } else if (nextWorld === 'D') {
+        if (!worldDVisitedRef.current) {
+            worldDVisitedRef.current = true;
+            worldDRotationAccumRef.current = 0;
+            worldDRotationProgressRef.current = 0;
+            setWorldDRotationProgress(0);
+            worldDStressHoldStartRef.current = null;
+            worldDStressHoldProgressRef.current = 0;
+            setWorldDStressProgress(0);
+            worldDStressActiveRef.current = false;
+            setWorldDStressActive(false);
+            worldDLastWristAngleRef.current = null;
+            if (defaultViewRef.current) {
+                const initialView = cloneViewState(defaultViewRef.current);
+                const maxDistance = getWorldMaxZoomDistance('D');
+                const offset = initialView.position.clone().sub(initialView.target);
+                const currentDistance = offset.length();
+                if (currentDistance > 0) {
+                    offset.setLength(maxDistance);
+                    initialView.position.copy(initialView.target).add(offset);
+                }
+                worldDViewRef.current = initialView;
+                applyViewState(initialView);
+            }
+        } else if (worldDViewRef.current) {
+            applyViewState(worldDViewRef.current);
+        }
+        updateWorldDReturnDistance();
+        worldDReturnArmedRef.current = false;
     } else {
         if (worldAViewRef.current) {
             applyViewState(worldAViewRef.current);
@@ -379,6 +835,9 @@ export function App() {
 
     applyZoomLimits(nextWorld);
     resetOkHold();
+    resetOkHoldC();
+    resetOkHoldD();
+    deepZoneActiveRef.current = false;
   };
 
   const setWorldImage = (nextImage: string) => {
@@ -410,6 +869,77 @@ export function App() {
     return pinch && middleExtended && ringExtended && pinkyExtended;
   };
 
+  const getWristRotationAngle = (hand: any) => {
+    if (!hand || hand.length < 10) return null;
+    const wrist = hand[0];
+    const mid = hand[9];
+    const dx = mid.x - wrist.x;
+    const dy = mid.y - wrist.y;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+    return Math.atan2(dy, dx);
+  };
+
+  const getFistStrength = (hand: any) => {
+    if (!hand || hand.length < 21) return 0;
+    const dist = (a: any, b: any) => Math.sqrt(
+        Math.pow(a.x - b.x, 2) +
+        Math.pow(a.y - b.y, 2) +
+        Math.pow(a.z - b.z, 2)
+    );
+    const palmCenter = {
+        x: (hand[0].x + hand[5].x + hand[9].x + hand[13].x + hand[17].x) / 5,
+        y: (hand[0].y + hand[5].y + hand[9].y + hand[13].y + hand[17].y) / 5,
+        z: (hand[0].z + hand[5].z + hand[9].z + hand[13].z + hand[17].z) / 5,
+    };
+    const palmSize = dist(hand[5], hand[17]) || dist(hand[0], hand[9]) || 1;
+    const fingers = [
+        [8, 6, 5],
+        [12, 10, 9],
+        [16, 14, 13],
+        [20, 18, 17],
+    ];
+    let sum = 0;
+    fingers.forEach(([tipIdx, pipIdx, mcpIdx]) => {
+        const tip = hand[tipIdx];
+        const pip = hand[pipIdx];
+        const mcp = hand[mcpIdx];
+        const tipDist = dist(tip, palmCenter);
+        const mcpDist = dist(mcp, palmCenter);
+        const tipScore = THREE.MathUtils.clamp((palmSize * 0.95 - tipDist) / (palmSize * 0.5), 0, 1);
+        const ratio = tipDist / (mcpDist || 1);
+        const ratioScore = THREE.MathUtils.clamp((1.1 - ratio) / 0.6, 0, 1);
+
+        const v1x = mcp.x - pip.x;
+        const v1y = mcp.y - pip.y;
+        const v1z = mcp.z - pip.z;
+        const v2x = tip.x - pip.x;
+        const v2y = tip.y - pip.y;
+        const v2z = tip.z - pip.z;
+        const v1Len = Math.sqrt(v1x * v1x + v1y * v1y + v1z * v1z);
+        const v2Len = Math.sqrt(v2x * v2x + v2y * v2y + v2z * v2z);
+        let angleScore = 0;
+        if (v1Len > 1e-5 && v2Len > 1e-5) {
+            const cos = THREE.MathUtils.clamp((v1x * v2x + v1y * v2y + v1z * v2z) / (v1Len * v2Len), -1, 1);
+            const angle = Math.acos(cos);
+            angleScore = THREE.MathUtils.clamp((Math.PI - angle) / (Math.PI * 0.7), 0, 1);
+        }
+
+        const fingerScore = tipScore * 0.5 + ratioScore * 0.3 + angleScore * 0.2;
+        sum += fingerScore;
+    });
+    const thumbTip = hand[4];
+    const indexMcp = hand[5];
+    const thumbToPalm = dist(thumbTip, palmCenter);
+    const thumbToIndex = dist(thumbTip, indexMcp);
+    const thumbScore = THREE.MathUtils.clamp(
+        (palmSize * 0.65 - Math.min(thumbToPalm, thumbToIndex)) / (palmSize * 0.65),
+        0,
+        1
+    );
+    const combined = (sum / fingers.length) * 0.85 + thumbScore * 0.15;
+    return Math.max(0, Math.min(1, combined));
+  };
+    
   const updateOkHold = (isOk: boolean) => {
     if (currentWorldRef.current !== 'A' || worldBUnlockedRef.current || !deepZoneActiveRef.current || !isOk) {
         resetOkHold();
@@ -428,6 +958,48 @@ export function App() {
     if (progress >= 1) {
         unlockWorldB();
         switchWorld('B');
+    }
+  };
+
+  const updateOkHoldC = (isOk: boolean) => {
+    if (currentWorldRef.current !== 'B' || worldCUnlockedRef.current || !deepZoneActiveRef.current || !isOk) {
+        resetOkHoldC();
+        return;
+    }
+
+    const now = performance.now();
+    if (!okHoldStartCRef.current) {
+        okHoldStartCRef.current = now;
+    }
+    const elapsed = now - okHoldStartCRef.current;
+    const progress = Math.min(elapsed / OK_HOLD_MS, 1);
+    if (progress !== okHoldProgressCRef.current) {
+        setOkProgressC(progress);
+    }
+    if (progress >= 1) {
+        unlockWorldC();
+        enterWorldC();
+    }
+  };
+
+  const updateOkHoldD = (isOk: boolean) => {
+    if (currentWorldRef.current !== 'C' || worldDUnlockedRef.current || !deepZoneActiveRef.current || !isOk) {
+        resetOkHoldD();
+        return;
+    }
+
+    const now = performance.now();
+    if (!okHoldStartDRef.current) {
+        okHoldStartDRef.current = now;
+    }
+    const elapsed = now - okHoldStartDRef.current;
+    const progress = Math.min(elapsed / OK_HOLD_MS, 1);
+    if (progress !== okHoldProgressDRef.current) {
+        setOkProgressD(progress);
+    }
+    if (progress >= 1) {
+        unlockWorldD();
+        enterWorldD();
     }
   };
 
@@ -545,6 +1117,7 @@ export function App() {
                 }
             }
             
+
             controlsRef.current.update();
 
         } else {
@@ -559,7 +1132,73 @@ export function App() {
             ? landmarks[leftHandIndex]
             : null;
         const okDetected = leftHand ? isOkGesture(leftHand) : false;
+
         updateOkHold(okDetected);
+        updateOkHoldC(okDetected);
+        updateOkHoldD(okDetected);
+
+        if (currentWorldRef.current === 'D') {
+            if (leftHand) {
+                const fistStrength = getFistStrength(leftHand);
+                worldDFistStrengthRef.current = THREE.MathUtils.lerp(worldDFistStrengthRef.current, fistStrength, 0.35);
+                const activateThreshold = WORLD_D_FIST_THRESHOLD;
+                const releaseThreshold = WORLD_D_FIST_THRESHOLD * 0.7;
+                const nextStress = worldDStressActiveRef.current
+                    ? worldDFistStrengthRef.current >= releaseThreshold
+                    : worldDFistStrengthRef.current >= activateThreshold;
+                if (nextStress !== worldDStressActiveRef.current) {
+                    worldDStressActiveRef.current = nextStress;
+                    setWorldDStressActive(nextStress);
+                    if (!nextStress && worldDStressHoldProgressRef.current < 1) {
+                        worldDStressHoldStartRef.current = null;
+                        worldDStressHoldProgressRef.current = 0;
+                        setWorldDStressProgress(0);
+                    }
+                }
+
+                const rotationBlocked = worldDStressActiveRef.current || worldDFistStrengthRef.current >= 0.35;
+                if (!rotationBlocked) {
+                    const wristAngle = getWristRotationAngle(leftHand);
+                    if (wristAngle !== null) {
+                        if (worldDLastWristAngleRef.current !== null && worldDGroupRef.current) {
+                            const delta = Math.atan2(
+                                Math.sin(wristAngle - worldDLastWristAngleRef.current),
+                                Math.cos(wristAngle - worldDLastWristAngleRef.current)
+                            );
+                            worldDGroupRef.current.rotation.y += delta;
+                            worldDRotationAccumRef.current = Math.min(worldDRotationAccumRef.current + Math.abs(delta), WORLD_D_ROTATE_REQUIRED);
+                            const progress = Math.min(worldDRotationAccumRef.current / WORLD_D_ROTATE_REQUIRED, 1);
+                            if (progress >= 1 && worldDRotationProgressRef.current < 1) {
+                                worldDRotationProgressRef.current = 1;
+                                setWorldDRotationProgress(1);
+                            } else if (Math.abs(progress - worldDRotationProgressRef.current) > 0.005) {
+                                worldDRotationProgressRef.current = progress;
+                                setWorldDRotationProgress(progress);
+                            }
+                        }
+                        worldDLastWristAngleRef.current = wristAngle;
+                    } else {
+                        worldDLastWristAngleRef.current = null;
+                    }
+                } else {
+                    worldDLastWristAngleRef.current = null;
+                }
+            } else {
+                worldDLastWristAngleRef.current = null;
+                worldDFistStrengthRef.current = 0;
+                if (worldDStressActiveRef.current) {
+                    worldDStressActiveRef.current = false;
+                    setWorldDStressActive(false);
+                    if (worldDStressHoldProgressRef.current < 1) {
+                        worldDStressHoldStartRef.current = null;
+                        worldDStressHoldProgressRef.current = 0;
+                        setWorldDStressProgress(0);
+                    }
+                }
+            }
+        } else {
+            worldDLastWristAngleRef.current = null;
+        }
     };
 
     const initMediaPipe = async () => {
@@ -686,6 +1325,63 @@ export function App() {
     worldBReturnDistanceRef.current = null;
     worldBReturnArmedRef.current = false;
     worldBEntryArmedRef.current = false;
+    worldCVisitedRef.current = false;
+    worldCViewRef.current = null;
+    worldCEntryArmedRef.current = false;
+    worldCReturnDistanceRef.current = null;
+    worldCReturnArmedRef.current = false;
+    worldCReadyRef.current = false;
+    worldCModelRef.current = null;
+    worldCLoadingRef.current = null;
+    worldCPendingRef.current = false;
+    worldCLightsRef.current = null;
+    worldDVisitedRef.current = false;
+    worldDViewRef.current = null;
+    worldDEntryArmedRef.current = false;
+    worldDReturnDistanceRef.current = null;
+    worldDReturnArmedRef.current = false;
+    worldDReadyRef.current = false;
+    worldDGroupRef.current = null;
+    worldDParticlesRef.current = null;
+    worldDParticleDataRef.current = null;
+    worldDTopRef.current = null;
+    worldDBottomRef.current = null;
+    worldDGrooveRef.current = null;
+    worldDMaterialRef.current = null;
+    worldDGrooveMaterialRef.current = null;
+    worldDLightsRef.current = null;
+    worldDUnlockedRef.current = false;
+    setWorldDUnlocked(false);
+    deepZoneReachedCRef.current = false;
+    setDeepZoneReachedC(false);
+    okHoldStartDRef.current = null;
+    okHoldProgressDRef.current = 0;
+    setOkHoldProgressD(0);
+    worldDRotationAccumRef.current = 0;
+    worldDRotationProgressRef.current = 0;
+    setWorldDRotationProgress(0);
+    worldDStressHoldStartRef.current = null;
+    worldDStressHoldProgressRef.current = 0;
+    setWorldDStressProgress(0);
+    worldDStressActiveRef.current = false;
+    setWorldDStressActive(false);
+    worldDLastWristAngleRef.current = null;
+    worldBUnlockedRef.current = false;
+    setWorldBUnlocked(false);
+    worldCUnlockedRef.current = false;
+    setWorldCUnlocked(false);
+    setWorldCLoading(false);
+    deepZoneActiveRef.current = false;
+    deepZoneReachedRef.current = false;
+    setDeepZoneReached(false);
+    deepZoneReachedBRef.current = false;
+    setDeepZoneReachedB(false);
+    okHoldStartRef.current = null;
+    okHoldProgressRef.current = 0;
+    setOkHoldProgress(0);
+    okHoldStartCRef.current = null;
+    okHoldProgressCRef.current = 0;
+    setOkHoldProgressC(0);
     defaultMaxDistanceRef.current = camera.position.distanceTo(controls.target);
     controls.minDistance = MIN_ZOOM_DISTANCE;
     controls.maxDistance = MAX_ZOOM_DISTANCE;
@@ -752,41 +1448,201 @@ export function App() {
                 // Also update damping
                 controls.update();
 
-                const distToTarget = camera.position.distanceTo(controls.target);
-                const isDeepZone = distToTarget <= DEEP_ZONE_DISTANCE;
-                if (isDeepZone !== deepZoneActiveRef.current) {
-                    deepZoneActiveRef.current = isDeepZone;
-                    if (isDeepZone && !deepZoneReachedRef.current) {
-                        deepZoneReachedRef.current = true;
-                        setDeepZoneReached(true);
-                    }
-                    if (!isDeepZone) {
-                        resetOkHold();
-                    }
-                }
+                                                                const distToTarget = camera.position.distanceTo(controls.target);
+                                const isDeepZone = distToTarget <= DEEP_ZONE_DISTANCE;
+                                const isWorldA = currentWorldRef.current === 'A';
+                                const isWorldB = currentWorldRef.current === 'B';
+                                const isWorldC = currentWorldRef.current === 'C';
+                                if (isWorldA || isWorldB || isWorldC) {
+                                    if (isDeepZone !== deepZoneActiveRef.current) {
+                                        deepZoneActiveRef.current = isDeepZone;
+                                        if (isDeepZone) {
+                                            if (isWorldA && !deepZoneReachedRef.current) {
+                                                deepZoneReachedRef.current = true;
+                                                setDeepZoneReached(true);
+                                            }
+                                            if (isWorldB && !deepZoneReachedBRef.current) {
+                                                deepZoneReachedBRef.current = true;
+                                                setDeepZoneReachedB(true);
+                                            }
+                                            if (isWorldC && !deepZoneReachedCRef.current) {
+                                                deepZoneReachedCRef.current = true;
+                                                setDeepZoneReachedC(true);
+                                            }
+                                        } else {
+                                            if (isWorldA) {
+                                                resetOkHold();
+                                            }
+                                            if (isWorldB) {
+                                                resetOkHoldC();
+                                            }
+                                            if (isWorldC) {
+                                                resetOkHoldD();
+                                            }
+                                        }
+                                    }
+                                } else if (deepZoneActiveRef.current) {
+                                    deepZoneActiveRef.current = false;
+                                }
 
-                const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
-                if (currentWorldRef.current === 'B') {
-                    const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
-                    if (!worldBReturnArmedRef.current && distToTarget < armDistance) {
-                        worldBReturnArmedRef.current = true;
-                    }
-                    if (worldBReturnArmedRef.current && distToTarget >= returnDistance) {
-                        switchWorld('A');
-                    }
-                }
+                                const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                                if (currentWorldRef.current === 'B') {
+                                    const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                    if (!worldBReturnArmedRef.current && distToTarget < armDistance) {
+                                        worldBReturnArmedRef.current = true;
+                                    }
+                                    if (worldBReturnArmedRef.current && distToTarget >= returnDistance) {
+                                        switchWorld('A');
+                                    }
+                                }
 
-                if (currentWorldRef.current === 'A' && worldBUnlockedRef.current) {
-                    const reenterDistance = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN;
-                    if (!worldBEntryArmedRef.current && distToTarget > reenterDistance) {
-                        worldBEntryArmedRef.current = true;
-                    }
-                    if (worldBEntryArmedRef.current && isDeepZone) {
-                        switchWorld('B');
-                    }
-                }
+                                const returnDistanceC = worldCReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                                if (currentWorldRef.current === 'C') {
+                                    const armDistanceC = Math.max(returnDistanceC - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                    if (!worldCReturnArmedRef.current && distToTarget < armDistanceC) {
+                                        worldCReturnArmedRef.current = true;
+                                    }
+                                    if (worldCReturnArmedRef.current && distToTarget >= returnDistanceC) {
+                                        switchWorld('B');
+                                    }
+                                }
 
-                if (materialRef.current) {
+                                const returnDistanceD = worldDReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                                if (currentWorldRef.current === 'D') {
+                                    const armDistanceD = Math.max(returnDistanceD - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                    if (!worldDReturnArmedRef.current && distToTarget < armDistanceD) {
+                                        worldDReturnArmedRef.current = true;
+                                    }
+                                    if (worldDReturnArmedRef.current && distToTarget >= returnDistanceD) {
+                                        switchWorld('C');
+                                    }
+                                }
+
+                                if (currentWorldRef.current === 'A' && worldBUnlockedRef.current) {
+                                    const reenterDistance = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN;
+                                    if (!worldBEntryArmedRef.current && distToTarget > reenterDistance) {
+                                        worldBEntryArmedRef.current = true;
+                                    }
+                                    if (worldBEntryArmedRef.current && isDeepZone) {
+                                        switchWorld('B');
+                                    }
+                                }
+
+                                if (currentWorldRef.current === 'B' && worldCUnlockedRef.current) {
+                                    const reenterDistanceC = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN_C;
+                                    if (!worldCEntryArmedRef.current && distToTarget > reenterDistanceC) {
+                                        worldCEntryArmedRef.current = true;
+                                    }
+                                    if (worldCEntryArmedRef.current && isDeepZone) {
+                                        enterWorldC();
+                                    }
+                                }
+
+                                if (currentWorldRef.current === 'C' && worldDUnlockedRef.current) {
+                                    const reenterDistanceD = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN_D;
+                                    if (!worldDEntryArmedRef.current && distToTarget > reenterDistanceD) {
+                                        worldDEntryArmedRef.current = true;
+                                    }
+                                    if (worldDEntryArmedRef.current && isDeepZone) {
+                                        enterWorldD();
+                                    }
+                                }
+
+                                if (currentWorldRef.current === 'D') {
+                                    const stressActive = worldDStressActiveRef.current;
+                                    if (stressActive) {
+                                        if (!worldDStressHoldStartRef.current) {
+                                            worldDStressHoldStartRef.current = performance.now();
+                                        }
+                                        const elapsed = performance.now() - worldDStressHoldStartRef.current;
+                                        const progress = Math.min(elapsed / WORLD_D_STRESS_HOLD_MS, 1);
+                                        if (Math.abs(progress - worldDStressHoldProgressRef.current) > 0.01) {
+                                            worldDStressHoldProgressRef.current = progress;
+                                            setWorldDStressProgress(progress);
+                                        }
+                                    }
+                                    if (worldDGroupRef.current) {
+                                        const pulse = 0.5 + 0.5 * Math.sin(elapsedTime * 6);
+                                        const squeeze = stressActive ? 0.86 + 0.05 * Math.sin(elapsedTime * 8) : 1;
+                                        const top = worldDTopRef.current;
+                                        const bottom = worldDBottomRef.current;
+                                        if (top && bottom) {
+                                            const baseTop = (top.userData.baseY as number) ?? top.position.y;
+                                            const baseBottom = (bottom.userData.baseY as number) ?? bottom.position.y;
+                                            top.position.y = baseTop * squeeze;
+                                            bottom.position.y = baseBottom * squeeze;
+                                            const scaleY = stressActive ? 0.9 + 0.05 * Math.sin(elapsedTime * 9) : 1;
+                                            top.scale.set(1, scaleY, 1);
+                                            bottom.scale.set(1, scaleY, 1);
+                                        }
+                                        if (worldDGrooveRef.current) {
+                                            worldDGrooveRef.current.scale.set(1, squeeze, 1);
+                                        }
+                                        const groupScale = stressActive ? 1 + 0.015 * Math.sin(elapsedTime * 6) : 1;
+                                        worldDGroupRef.current.scale.setScalar(groupScale);
+                                        if (worldDMaterialRef.current && worldDGrooveMaterialRef.current) {
+                                            if (stressActive) {
+                                                worldDMaterialRef.current.color.setHex(0xfafafa);
+                                                worldDMaterialRef.current.emissive.setHex(0x1cffff);
+                                                worldDMaterialRef.current.emissiveIntensity = 0.6 + 0.25 * pulse;
+                                                worldDGrooveMaterialRef.current.color.setHex(0x1a1a1a);
+                                                worldDGrooveMaterialRef.current.emissive.setHex(0x00b3ff);
+                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.5 + 0.2 * pulse;
+                                            } else {
+                                                worldDMaterialRef.current.color.setHex(0xdedede);
+                                                worldDMaterialRef.current.emissive.setHex(0x111111);
+                                                worldDMaterialRef.current.emissiveIntensity = 0.4;
+                                                worldDGrooveMaterialRef.current.color.setHex(0x8a8a8a);
+                                                worldDGrooveMaterialRef.current.emissive.setHex(0x111111);
+                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.4;
+                                            }
+                                        }
+                                    }
+                                    if (worldDParticlesRef.current && worldDParticleDataRef.current) {
+                                        const { positions, velocities, basePositions } = worldDParticleDataRef.current;
+                                        const pull = stressActive ? 0.006 : 0.004;
+                                        const relax = 0.02;
+                                        const damp = 0.88;
+                                        for (let i = 0; i < positions.length; i += 3) {
+                                            const px = positions[i];
+                                            const py = positions[i + 1];
+                                            const pz = positions[i + 2];
+                                            let vx = velocities[i];
+                                            let vy = velocities[i + 1];
+                                            let vz = velocities[i + 2];
+                                            if (stressActive) {
+                                                vx += -px * pull;
+                                                vy += -py * pull;
+                                                vz += -pz * pull;
+                                            } else {
+                                                vx += (basePositions[i] - px) * relax;
+                                                vy += (basePositions[i + 1] - py) * relax;
+                                                vz += (basePositions[i + 2] - pz) * relax;
+                                            }
+                                            vx *= damp;
+                                            vy *= damp;
+                                            vz *= damp;
+                                            positions[i] = px + vx;
+                                            positions[i + 1] = py + vy;
+                                            positions[i + 2] = pz + vz;
+                                            velocities[i] = vx;
+                                            velocities[i + 1] = vy;
+                                            velocities[i + 2] = vz;
+                                        }
+                                        const geometry = worldDParticlesRef.current.geometry as THREE.BufferGeometry;
+                                        (geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+                                        const material = worldDParticlesRef.current.material as THREE.PointsMaterial;
+                                        if (stressActive) {
+                                            material.color.setHex(0xffffff);
+                                            material.opacity = 0.85;
+                                        } else {
+                                            material.color.setHex(0xaefcff);
+                                            material.opacity = 0.6;
+                                        }
+                                    }
+                                }
+
+if (materialRef.current) {
                     materialRef.current.uniforms.uTime.value = elapsedTime;
                     materialRef.current.uniforms.uDisplacementStrength.value = paramsRef.current.displacement;
                     materialRef.current.uniforms.uNoiseSpeed.value = paramsRef.current.noiseSpeed;
@@ -826,6 +1682,8 @@ export function App() {
             setLoading(false);
             const preloadTarget = currentWorldRef.current === 'A' ? worldBImageRef.current : worldAImageRef.current;
             preloadTexture(preloadTarget);
+            preloadWorldCModel();
+            ensureWorldDModel();
         },
         undefined, // onProgress
         (err) => {
@@ -860,7 +1718,7 @@ export function App() {
         window.removeEventListener('resize', handleResize);
     };
 
-  }, [buildGeometryFromTexture, preloadTexture]);
+  }, [buildGeometryFromTexture, preloadTexture, preloadWorldCModel, ensureWorldDModel]);
 
   useEffect(() => {
      if (!imageSrc) {
@@ -1055,11 +1913,161 @@ export function App() {
                             </div>
                         </div>
 
+                        {worldBUnlocked && (
+                            <>
+                                <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${deepZoneReachedB ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${deepZoneReachedB ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 3: Enter World B deep zone
+                                        </div>
+                                        <div className="text-[10px] text-neutral-500">Zoom into World B to unlock the next gate.</div>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldCUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${worldCUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 4: Left-hand OK for 3 seconds
+                                        </div>
+                                        {!worldCUnlocked && (
+                                            <div className="mt-2">
+                                                <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
+                                                    <span>Confirm progress</span>
+                                                    <span>{Math.round(okHoldProgressC * 100)}%</span>
+                                                </div>
+                                                <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-emerald-500 transition-[width] duration-150"
+                                                        style={{ width: `${Math.round(okHoldProgressC * 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+                                        {worldCUnlocked && (
+                                            <div className="text-[10px] text-emerald-400 mt-1">World C unlocked</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </>
+                        )}
+
+                                                {worldCUnlocked && (
+                            <>
+                                <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${deepZoneReachedC ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${deepZoneReachedC ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 5: Enter World C deep zone
+                                        </div>
+                                        <div className="text-[10px] text-neutral-500">Zoom into World C to unlock the next gate.</div>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${worldDUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 6: Left-hand OK for 3 seconds
+                                        </div>
+                                        {!worldDUnlocked && (
+                                            <div className="mt-2">
+                                                <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
+                                                    <span>Confirm progress</span>
+                                                    <span>{Math.round(okHoldProgressD * 100)}%</span>
+                                                </div>
+                                                <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-emerald-500 transition-[width] duration-150"
+                                                        style={{ width: `${Math.round(okHoldProgressD * 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+                                        {worldDUnlocked && (
+                                            <div className="text-[10px] text-emerald-400 mt-1">World D unlocked</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </>
+                        )}
+
+                        {currentWorld === 'D' && (
+                            <>
+                                <div className="text-[10px] text-neutral-500 uppercase tracking-widest">Goal</div>
+                                <div className="text-[10px] text-neutral-400">Observe bacterial division under mechanical stress.</div>
+                                <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDRotationProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${worldDRotationProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 7: Left-hand wrist rotation &gt;= 1.5 rad
+                                        </div>
+                                        {worldDRotationProgress < 1 && (
+                                            <div className="mt-2">
+                                                <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
+                                                    <span>Rotation progress</span>
+                                                    <span>{Math.round(worldDRotationProgress * 100)}%</span>
+                                                </div>
+                                                <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-emerald-500 transition-[width] duration-150"
+                                                        style={{ width: `${Math.round(worldDRotationProgress * 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+                                        {worldDRotationProgress >= 1 && (
+                                            <div className="text-[10px] text-emerald-400 mt-1">Rotation confirmed</div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDStressProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${worldDStressProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 8: Left-hand fist stress for 3 seconds
+                                        </div>
+                                        {worldDStressProgress < 1 && (
+                                            <div className="mt-2">
+                                                <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
+                                                    <span>{worldDStressActive ? 'Stress active' : 'Awaiting left-hand fist'}</span>
+                                                    <span>{Math.round(worldDStressProgress * 100)}%</span>
+                                                </div>
+                                                <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-emerald-500 transition-[width] duration-150"
+                                                        style={{ width: `${Math.round(worldDStressProgress * 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+                                        {worldDStressProgress >= 1 && (
+                                            <div className="text-[10px] text-emerald-400 mt-1">Stress hold confirmed</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </>
+                        )}
+
                         {!worldBUnlocked && !handControlEnabled && (
                             <div className="text-[10px] text-neutral-500">Tip: enable hand control to confirm.</div>
                         )}
+                        {worldBUnlocked && !worldCUnlocked && !handControlEnabled && (
+                            <div className="text-[10px] text-neutral-500">Tip: keep hand control on to confirm Task 4.</div>
+                        )}
+                        {worldCUnlocked && !worldDUnlocked && !handControlEnabled && (
+                            <div className="text-[10px] text-neutral-500">Tip: keep hand control on to confirm Task 6.</div>
+                        )}
                         {currentWorld === 'B' && (
-                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World A.</div>
+                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World A{worldCUnlocked ? ', zoom in to enter World C.' : '.'}</div>
+                        )}
+                        {currentWorld === 'C' && (
+                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World B{worldDUnlocked ? ', zoom in to enter World D.' : '.'}</div>
+                        )}
+                        {currentWorld === 'D' && (
+                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World C.</div>
                         )}
                     </div>
                 </div>
@@ -1079,9 +2087,9 @@ export function App() {
                                     <Hand className="w-3 h-3" />
                                     <span className="font-bold">Right Hand Active</span>
                                 </div>
-                                <span className="opacity-70 pl-5">�?Move hand to pan</span>
-                                <span className="opacity-70 pl-5">�?Pinch close: Zoom In</span>
-                                <span className="opacity-70 pl-5">�?Pinch open: Zoom Out</span>
+                                <span className="opacity-70 pl-5">Move hand to pan</span>
+                                <span className="opacity-70 pl-5">👌Pinch close: Zoom In</span>
+                                <span className="opacity-70 pl-5">🖐Pinch open: Zoom Out</span>
                              </div>
                          )}
 
