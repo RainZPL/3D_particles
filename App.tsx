@@ -22,11 +22,11 @@ const DEFAULT_IMAGE = "/A.png";
 const WORLD_B_IMAGE = "/B.png";
 const WORLD_C_MODEL = "/C.glb";
 const MIN_ZOOM_DISTANCE = 50;
-const MAX_ZOOM_DISTANCE = 2000;
+const MAX_ZOOM_DISTANCE = 1000;
 const DEEP_ZONE_DISTANCE = 70;
-const RETURN_ZONE_DISTANCE = 220;
+const RETURN_ZONE_DISTANCE = 300;
 const RETURN_MARGIN = 60;
-const RETURN_ARM_MARGIN = 10;
+const RETURN_ARM_MARGIN = 20;
 const REENTER_ARM_MARGIN = 20;
 const REENTER_ARM_MARGIN_C = 20;
 const WORLD_B_MAX_DISTANCE_FACTOR = 1.1;
@@ -38,6 +38,7 @@ const WORLD_D_FIST_THRESHOLD = 0.5;
 const WORLD_D_STRESS_HOLD_MS = 3000;
 const WORLD_D_PARTICLE_COUNT = 600;
 const OK_HOLD_MS = 3000;
+const WORLD_SWITCH_COOLDOWN_MS = 350;
 
 // Fallback in case A.png is missing
 const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1563089145-599997674d42?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80";
@@ -108,6 +109,8 @@ export function App() {
   const rightHandZoomVelocityRef = useRef(0);
   const rightHandActiveRef = useRef(false);
   const handFrameTimeRef = useRef<number | null>(null);
+  const worldSwitchCooldownRef = useRef(0);
+  const lastZoomDistanceRef = useRef<number | null>(null);
   // Refs for Three.js objects
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -323,8 +326,8 @@ export function App() {
   }, []);
 
   const buildWorldCParticles = useCallback((model: THREE.Object3D) => {
-    const baseColor = new THREE.Color(0x6fdedc);
-    const highlight = new THREE.Color(0xcfffff);
+    const baseColor = new THREE.Color(0xe6540b);
+    const highlight = new THREE.Color(0xf0a57f);
     let total = 0;
     model.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
@@ -781,6 +784,8 @@ const cloneViewState = (state: ViewState) => ({
 
     currentWorldRef.current = nextWorld;
     setCurrentWorld(nextWorld);
+    worldSwitchCooldownRef.current = performance.now() + WORLD_SWITCH_COOLDOWN_MS;
+    lastZoomDistanceRef.current = null;
     if (previousWorld === 'D' && nextWorld !== 'D') {
         worldDStressActiveRef.current = false;
         worldDStressHoldStartRef.current = null;
@@ -807,6 +812,7 @@ const cloneViewState = (state: ViewState) => ({
     setWorldVisibility(nextWorld);
 
     if (nextWorld === 'B') {
+        const fromWorldC = previousWorld === 'C';
         if (!worldBVisitedRef.current) {
             worldBVisitedRef.current = true;
             if (defaultViewRef.current) {
@@ -827,10 +833,15 @@ const cloneViewState = (state: ViewState) => ({
             }
         }
         setGrowthInstant(MAX_GROWTH);
-        updateWorldBReturnDistance();
-        worldBReturnArmedRef.current = false;
+        if (fromWorldC) {
+            worldBReturnDistanceRef.current = getWorldMaxZoomDistance('B');
+        } else {
+            updateWorldBReturnDistance();
+        }
+        worldBReturnArmedRef.current = true;
         worldCEntryArmedRef.current = false;
     } else if (nextWorld === 'C') {
+        const fromWorldD = previousWorld === 'D';
         if (!worldCVisitedRef.current) {
             worldCVisitedRef.current = true;
             if (defaultViewRef.current) {
@@ -848,8 +859,12 @@ const cloneViewState = (state: ViewState) => ({
         } else if (worldCViewRef.current) {
             applyViewState(worldCViewRef.current);
         }
-        updateWorldCReturnDistance();
-        worldCReturnArmedRef.current = false;
+        if (fromWorldD) {
+            worldCReturnDistanceRef.current = getWorldMaxZoomDistance('C');
+        } else {
+            updateWorldCReturnDistance();
+        }
+        worldCReturnArmedRef.current = true;
         worldDEntryArmedRef.current = false;
     } else if (nextWorld === 'D') {
         if (!worldDVisitedRef.current) {
@@ -879,7 +894,7 @@ const cloneViewState = (state: ViewState) => ({
             applyViewState(worldDViewRef.current);
         }
         updateWorldDReturnDistance();
-        worldDReturnArmedRef.current = false;
+        worldDReturnArmedRef.current = true;
     } else {
         if (worldAViewRef.current) {
             applyViewState(worldAViewRef.current);
@@ -1512,8 +1527,8 @@ const cloneViewState = (state: ViewState) => ({
 
                     const handDistToTarget = camera.position.distanceTo(controls.target);
                     const handMaxZoomDistance = getWorldMaxZoomDistance(currentWorldRef.current);
-                    const zoomSpeedIn = 36;
-                    const zoomSpeedOut = 24;
+                    const zoomSpeedIn = 15;
+                    const zoomSpeedOut = 15;
                     const zoomDelta = rightHandZoomVelocityRef.current * speed;
                     const zoomStep = zoomDelta > 0 ? zoomDelta * zoomSpeedIn : zoomDelta * zoomSpeedOut;
 
@@ -1572,36 +1587,43 @@ const cloneViewState = (state: ViewState) => ({
                                     deepZoneActiveRef.current = false;
                                 }
 
-                                const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
-                                if (currentWorldRef.current === 'B') {
-                                    const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
-                                    if (!worldBReturnArmedRef.current && distToTarget < armDistance) {
-                                        worldBReturnArmedRef.current = true;
-                                    }
-                                    if (worldBReturnArmedRef.current && distToTarget >= returnDistance) {
-                                        switchWorld('A');
-                                    }
-                                }
+                                const now = performance.now();
+                                const distDelta = lastZoomDistanceRef.current === null ? 0 : distToTarget - lastZoomDistanceRef.current;
+                                lastZoomDistanceRef.current = distToTarget;
+                                const zoomOutIntent = rightHandZoomTargetRef.current < -0.2 || distDelta > 0.2;
 
-                                const returnDistanceC = worldCReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
-                                if (currentWorldRef.current === 'C') {
-                                    const armDistanceC = Math.max(returnDistanceC - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
-                                    if (!worldCReturnArmedRef.current && distToTarget < armDistanceC) {
-                                        worldCReturnArmedRef.current = true;
+                                if (now >= worldSwitchCooldownRef.current) {
+                                    const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                                    if (currentWorldRef.current === 'B') {
+                                        const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                        if (!worldBReturnArmedRef.current && distToTarget < armDistance) {
+                                            worldBReturnArmedRef.current = true;
+                                        }
+                                        if (worldBReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistance) {
+                                            switchWorld('A');
+                                        }
                                     }
-                                    if (worldCReturnArmedRef.current && distToTarget >= returnDistanceC) {
-                                        switchWorld('B');
-                                    }
-                                }
 
-                                const returnDistanceD = worldDReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
-                                if (currentWorldRef.current === 'D') {
-                                    const armDistanceD = Math.max(returnDistanceD - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
-                                    if (!worldDReturnArmedRef.current && distToTarget < armDistanceD) {
-                                        worldDReturnArmedRef.current = true;
+                                    const returnDistanceC = worldCReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                                    if (currentWorldRef.current === 'C') {
+                                        const armDistanceC = Math.max(returnDistanceC - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                        if (!worldCReturnArmedRef.current && distToTarget < armDistanceC) {
+                                            worldCReturnArmedRef.current = true;
+                                        }
+                                        if (worldCReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistanceC) {
+                                            switchWorld('B');
+                                        }
                                     }
-                                    if (worldDReturnArmedRef.current && distToTarget >= returnDistanceD) {
-                                        switchWorld('C');
+
+                                    const returnDistanceD = worldDReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                                    if (currentWorldRef.current === 'D') {
+                                        const armDistanceD = Math.max(returnDistanceD - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                        if (!worldDReturnArmedRef.current && distToTarget < armDistanceD) {
+                                            worldDReturnArmedRef.current = true;
+                                        }
+                                        if (worldDReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistanceD) {
+                                            switchWorld('C');
+                                        }
                                     }
                                 }
 
