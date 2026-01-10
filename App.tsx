@@ -44,8 +44,10 @@ const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1563089145-599997674d4
 const MAX_GROWTH = 0.85; 
 
 // Zoom Thresholds
-const ZOOM_IN_THRESHOLD = 0.05; // Fingers close together
-const ZOOM_OUT_THRESHOLD = 0.12; // Fingers spread apart
+const ZOOM_IN_THRESHOLD = 0.07; // Fingers close together
+const ZOOM_OUT_THRESHOLD = 0.15; // Fingers spread apart
+const ZOOM_IN_RANGE = 0.045;
+const ZOOM_OUT_RANGE = 0.14;
 
 type ViewState = { position: THREE.Vector3; target: THREE.Vector3 };
 
@@ -101,7 +103,11 @@ export function App() {
   const previousHandPos = useRef<{x: number, y: number} | null>(null);
   const smoothedHandPos = useRef<{x: number, y: number} | null>(null);
   const handVelocity = useRef<{x: number, y: number}>({ x: 0, y: 0 });
-  const lastHandTs = useRef<number | null>(null);
+  const rightHandTargetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const rightHandZoomTargetRef = useRef(0);
+  const rightHandZoomVelocityRef = useRef(0);
+  const rightHandActiveRef = useRef(false);
+  const handFrameTimeRef = useRef<number | null>(null);
   // Refs for Three.js objects
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -112,8 +118,8 @@ export function App() {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const pointsRef = useRef<THREE.Points | null>(null);
-  const worldCModelRef = useRef<THREE.Group | null>(null);
-  const worldCLoadingRef = useRef<Promise<THREE.Group> | null>(null);
+  const worldCModelRef = useRef<THREE.Object3D | null>(null);
+  const worldCLoadingRef = useRef<Promise<THREE.Object3D> | null>(null);
   const worldCReadyRef = useRef(false);
   const worldCPendingRef = useRef(false);
   const worldCLightsRef = useRef<THREE.Light[] | null>(null);
@@ -316,6 +322,56 @@ export function App() {
     model.position.sub(center);
   }, []);
 
+  const buildWorldCParticles = useCallback((model: THREE.Object3D) => {
+    const baseColor = new THREE.Color(0x6fdedc);
+    const highlight = new THREE.Color(0xcfffff);
+    let total = 0;
+    model.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const geometry = (child as THREE.Mesh).geometry as THREE.BufferGeometry;
+        const position = geometry.getAttribute('position');
+        if (position) {
+          total += position.count;
+        }
+      }
+    });
+    const targetCount = 12000;
+    const step = total > 0 ? Math.max(1, Math.floor(total / targetCount)) : 1;
+    const positions: number[] = [];
+    const colors: number[] = [];
+    const temp = new THREE.Vector3();
+    model.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh;
+        const geometry = mesh.geometry as THREE.BufferGeometry;
+        const position = geometry.getAttribute('position');
+        if (!position) return;
+        for (let i = 0; i < position.count; i += step) {
+          temp.fromBufferAttribute(position, i);
+          temp.applyMatrix4(mesh.matrixWorld);
+          positions.push(temp.x, temp.y, temp.z);
+          const t = Math.random();
+          const color = baseColor.clone().lerp(highlight, 0.35 + 0.65 * t);
+          colors.push(color.r, color.g, color.b);
+        }
+      }
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingSphere();
+    const material = new THREE.PointsMaterial({
+      size: 2.3,
+      color: 0xffffff,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    return new THREE.Points(geometry, material);
+  }, []);
+
   const loadWorldCModel = useCallback(() => {
     if (worldCReadyRef.current && worldCModelRef.current) {
       return Promise.resolve(worldCModelRef.current);
@@ -328,20 +384,22 @@ export function App() {
     }
     setWorldCLoading(true);
     const loader = new GLTFLoader();
-    const promise = new Promise<THREE.Group>((resolve, reject) => {
+    const promise = new Promise<THREE.Object3D>((resolve, reject) => {
       loader.load(
         WORLD_C_MODEL,
         (gltf) => {
           ensureWorldCLights();
           const model = gltf.scene;
           fitWorldCModel(model);
-          model.visible = false;
-          sceneRef.current.add(model);
-          worldCModelRef.current = model;
+          model.updateMatrixWorld(true);
+          const points = buildWorldCParticles(model);
+          points.visible = false;
+          sceneRef.current.add(points);
+          worldCModelRef.current = points;
           worldCReadyRef.current = true;
           worldCLoadingRef.current = null;
           setWorldCLoading(false);
-          resolve(model);
+          resolve(points);
         },
         undefined,
         (err) => {
@@ -353,7 +411,7 @@ export function App() {
     });
     worldCLoadingRef.current = promise;
     return promise;
-  }, [ensureWorldCLights, fitWorldCModel]);
+  }, [ensureWorldCLights, fitWorldCModel, buildWorldCParticles]);
 
   const preloadWorldCModel = useCallback(() => {
     void loadWorldCModel().catch((err) => {
@@ -726,8 +784,10 @@ const cloneViewState = (state: ViewState) => ({
     if (previousWorld === 'D' && nextWorld !== 'D') {
         worldDStressActiveRef.current = false;
         worldDStressHoldStartRef.current = null;
-        worldDStressHoldProgressRef.current = 0;
-        setWorldDStressProgress(0);
+        if (worldDStressHoldProgressRef.current < 1) {
+            worldDStressHoldProgressRef.current = 0;
+            setWorldDStressProgress(0);
+        }
         setWorldDStressActive(false);
         worldDFistStrengthRef.current = 0;
         worldDLastWristAngleRef.current = null;
@@ -1034,7 +1094,8 @@ const cloneViewState = (state: ViewState) => ({
 
         if (rightHandIndex !== -1 && landmarks && landmarks[rightHandIndex]) {
             const hand = landmarks[rightHandIndex];
-            
+            rightHandActiveRef.current = true;
+
             // --- Panning Logic (Wrist) ---
             const rawX = hand[0].x;
             const rawY = hand[0].y;
@@ -1044,88 +1105,56 @@ const cloneViewState = (state: ViewState) => ({
             } else {
                 // Low-pass filter to reduce jitter.
                 smoothedHandPos.current = {
-                    x: THREE.MathUtils.lerp(smoothedHandPos.current.x, rawX, 0.25),
-                    y: THREE.MathUtils.lerp(smoothedHandPos.current.y, rawY, 0.25),
+                    x: THREE.MathUtils.lerp(smoothedHandPos.current.x, rawX, 0.2),
+                    y: THREE.MathUtils.lerp(smoothedHandPos.current.y, rawY, 0.2),
                 };
             }
 
             if (previousHandPos.current) {
                 // Sensitivity factor
-                const sensitivity = 200; 
-                const now = performance.now();
-                const dt = lastHandTs.current ? Math.min((now - lastHandTs.current) / 1000, 0.05) : 1 / 60;
-                lastHandTs.current = now;
-                
+                const sensitivity = 140;
+
                 // Calculate deltas
                 // Note: In selfie mode, x moves normal (left is 0, right is 1)
                 const deltaX = (smoothedHandPos.current.x - previousHandPos.current.x) * sensitivity;
                 const deltaY = (smoothedHandPos.current.y - previousHandPos.current.y) * sensitivity;
-                const deadZone = 0.25;
+                const deadZone = 0.18;
                 const targetX = Math.abs(deltaX) < deadZone ? 0 : deltaX;
                 const targetY = Math.abs(deltaY) < deadZone ? 0 : deltaY;
-                const smooth = 0.85;
-                handVelocity.current.x = THREE.MathUtils.lerp(handVelocity.current.x, targetX, 1 - smooth);
-                handVelocity.current.y = THREE.MathUtils.lerp(handVelocity.current.y, targetY, 1 - smooth);
-                const speed = Math.min(dt * 60, 2);
-
-                const cameraObj = cameraRef.current;
-                
-                // Get Camera vectors
-                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cameraObj.quaternion);
-                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(cameraObj.quaternion);
-
-                // "Camera follows hand" logic
-                // Hand Right (+X) -> Camera moves Right (+RightVector)
-                // Hand Down (+Y in MP) -> Camera moves Down (-UpVector)
-                
-                const panVector = new THREE.Vector3()
-                    .addScaledVector(right, handVelocity.current.x * speed)
-                    .addScaledVector(up, -handVelocity.current.y * speed); 
-                
-                cameraObj.position.add(panVector);
-                controlsRef.current.target.add(panVector);
+                rightHandTargetRef.current.x = THREE.MathUtils.lerp(rightHandTargetRef.current.x, targetX, 0.35);
+                rightHandTargetRef.current.y = THREE.MathUtils.lerp(rightHandTargetRef.current.y, targetY, 0.35);
+            } else {
+                rightHandTargetRef.current.x = 0;
+                rightHandTargetRef.current.y = 0;
             }
 
             previousHandPos.current = { x: smoothedHandPos.current.x, y: smoothedHandPos.current.y };
+
             // --- Continuous Zoom Logic (Thumb Tip 4 to Index Tip 8) ---
             const thumb = hand[4];
             const index = hand[8];
             const dist = Math.sqrt(
-                Math.pow(thumb.x - index.x, 2) + 
+                Math.pow(thumb.x - index.x, 2) +
                 Math.pow(thumb.y - index.y, 2)
             );
 
-            // Determine Zoom State based on Thresholds
-            const zoomSpeed = 5.0; // Speed of continuous zoom
-            const cameraObj = cameraRef.current;
-            const viewDirection = new THREE.Vector3();
-            cameraObj.getWorldDirection(viewDirection);
-
-            // Distance Check to prevent clipping or getting lost
-            const distToTarget = cameraObj.position.distanceTo(controlsRef.current.target);
-            const maxZoomDistance = getWorldMaxZoomDistance(currentWorldRef.current);
-
+            let zoomIntent = 0;
             if (dist < ZOOM_IN_THRESHOLD) {
-                // Close pinch = Zoom In (Move forward)
-                if (distToTarget > MIN_ZOOM_DISTANCE) { // Min distance limit
-                     cameraObj.position.addScaledVector(viewDirection, zoomSpeed);
-                }
+                zoomIntent = THREE.MathUtils.clamp((ZOOM_IN_THRESHOLD - dist) / ZOOM_IN_RANGE, 0, 1);
             } else if (dist > ZOOM_OUT_THRESHOLD) {
-                // Open spread = Zoom Out (Move backward)
-                if (distToTarget < maxZoomDistance) { // Max distance limit
-                    cameraObj.position.addScaledVector(viewDirection, -zoomSpeed);
-                }
+                zoomIntent = -THREE.MathUtils.clamp((dist - ZOOM_OUT_THRESHOLD) / ZOOM_OUT_RANGE, 0, 1);
             }
-            
-
-            controlsRef.current.update();
-
+            rightHandZoomTargetRef.current = zoomIntent;
         } else {
             // Reset if hand lost or wrong hand
             previousHandPos.current = null;
             smoothedHandPos.current = null;
             handVelocity.current = { x: 0, y: 0 };
-            lastHandTs.current = null;
+            rightHandZoomVelocityRef.current = 0;
+            rightHandTargetRef.current.x = 0;
+            rightHandTargetRef.current.y = 0;
+            rightHandZoomTargetRef.current = 0;
+            rightHandActiveRef.current = false;
         }
 
         const leftHand = leftHandIndex !== -1 && landmarks && landmarks[leftHandIndex]
@@ -1247,6 +1276,15 @@ const cloneViewState = (state: ViewState) => ({
 
     return () => {
       isActive = false;
+      rightHandActiveRef.current = false;
+      rightHandTargetRef.current.x = 0;
+      rightHandTargetRef.current.y = 0;
+      rightHandZoomTargetRef.current = 0;
+      rightHandZoomVelocityRef.current = 0;
+      handVelocity.current = { x: 0, y: 0 };
+      previousHandPos.current = null;
+      smoothedHandPos.current = null;
+      handFrameTimeRef.current = null;
       if (cameraInstance) {
           cameraInstance.stop();
           cameraInstance = null;
@@ -1438,6 +1476,11 @@ const cloneViewState = (state: ViewState) => ({
             composer.addPass(bloomPass);
             composerRef.current = composer;
 
+            const handRight = new THREE.Vector3();
+            const handUp = new THREE.Vector3();
+            const handPan = new THREE.Vector3();
+            const handView = new THREE.Vector3();
+
             // Animation Loop
             const animate = () => {
                 animationFrameRef.current = requestAnimationFrame(animate);
@@ -1447,6 +1490,46 @@ const cloneViewState = (state: ViewState) => ({
                 // Only auto-rotate if hands aren't controlling it to avoid fighting
                 // Also update damping
                 controls.update();
+
+                const lastHandTime = handFrameTimeRef.current;
+                const handDelta = lastHandTime === null ? 1 / 60 : Math.min(elapsedTime - lastHandTime, 0.05);
+                handFrameTimeRef.current = elapsedTime;
+
+                if (rightHandActiveRef.current) {
+                    handVelocity.current.x = THREE.MathUtils.lerp(handVelocity.current.x, rightHandTargetRef.current.x, 0.12);
+                    handVelocity.current.y = THREE.MathUtils.lerp(handVelocity.current.y, rightHandTargetRef.current.y, 0.12);
+                    rightHandZoomVelocityRef.current = THREE.MathUtils.lerp(rightHandZoomVelocityRef.current, rightHandZoomTargetRef.current, 0.12);
+
+                    const speed = Math.min(handDelta * 60, 2);
+                    handRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+                    handUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+                    handPan.set(0, 0, 0)
+                        .addScaledVector(handRight, handVelocity.current.x * speed)
+                        .addScaledVector(handUp, -handVelocity.current.y * speed);
+
+                    camera.position.add(handPan);
+                    controls.target.add(handPan);
+
+                    const handDistToTarget = camera.position.distanceTo(controls.target);
+                    const handMaxZoomDistance = getWorldMaxZoomDistance(currentWorldRef.current);
+                    const zoomSpeedIn = 36;
+                    const zoomSpeedOut = 24;
+                    const zoomDelta = rightHandZoomVelocityRef.current * speed;
+                    const zoomStep = zoomDelta > 0 ? zoomDelta * zoomSpeedIn : zoomDelta * zoomSpeedOut;
+
+                    if (zoomStep !== 0) {
+                        camera.getWorldDirection(handView);
+                        if (zoomStep > 0 && handDistToTarget > MIN_ZOOM_DISTANCE) {
+                            camera.position.addScaledVector(handView, zoomStep);
+                        } else if (zoomStep < 0 && handDistToTarget < handMaxZoomDistance) {
+                            camera.position.addScaledVector(handView, zoomStep);
+                        }
+                    }
+                } else {
+                    handVelocity.current.x = THREE.MathUtils.lerp(handVelocity.current.x, 0, 0.08);
+                    handVelocity.current.y = THREE.MathUtils.lerp(handVelocity.current.y, 0, 0.08);
+                    rightHandZoomVelocityRef.current = THREE.MathUtils.lerp(rightHandZoomVelocityRef.current, 0, 0.08);
+                }
 
                                                                 const distToTarget = camera.position.distanceTo(controls.target);
                                 const isDeepZone = distToTarget <= DEEP_ZONE_DISTANCE;
@@ -1464,6 +1547,10 @@ const cloneViewState = (state: ViewState) => ({
                                             if (isWorldB && !deepZoneReachedBRef.current) {
                                                 deepZoneReachedBRef.current = true;
                                                 setDeepZoneReachedB(true);
+                                            }
+                                            if (isWorldB && !worldCUnlockedRef.current) {
+                                                unlockWorldC();
+                                                enterWorldC();
                                             }
                                             if (isWorldC && !deepZoneReachedCRef.current) {
                                                 deepZoneReachedCRef.current = true;
@@ -1925,31 +2012,6 @@ if (materialRef.current) {
                                     </div>
                                 </div>
 
-                                <div className="flex items-start gap-3">
-                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldCUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
-                                    <div className="flex-1">
-                                        <div className={`text-[11px] ${worldCUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 4: Left-hand OK for 3 seconds
-                                        </div>
-                                        {!worldCUnlocked && (
-                                            <div className="mt-2">
-                                                <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
-                                                    <span>Confirm progress</span>
-                                                    <span>{Math.round(okHoldProgressC * 100)}%</span>
-                                                </div>
-                                                <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
-                                                    <div
-                                                        className="h-full bg-emerald-500 transition-[width] duration-150"
-                                                        style={{ width: `${Math.round(okHoldProgressC * 100)}%` }}
-                                                    />
-                                                </div>
-                                            </div>
-                                        )}
-                                        {worldCUnlocked && (
-                                            <div className="text-[10px] text-emerald-400 mt-1">World C unlocked</div>
-                                        )}
-                                    </div>
-                                </div>
                             </>
                         )}
 
@@ -1959,7 +2021,7 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${deepZoneReachedC ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${deepZoneReachedC ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 5: Enter World C deep zone
+                                            Task 4: Enter World C deep zone
                                         </div>
                                         <div className="text-[10px] text-neutral-500">Zoom into World C to unlock the next gate.</div>
                                     </div>
@@ -1969,7 +2031,7 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 6: Left-hand OK for 3 seconds
+                                            Task 5: Left-hand OK for 3 seconds
                                         </div>
                                         {!worldDUnlocked && (
                                             <div className="mt-2">
@@ -2001,7 +2063,7 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDRotationProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDRotationProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 7: Left-hand wrist rotation &gt;= 1.5 rad
+                                            Task 6: Left-hand wrist rotation &gt;= 1.5 rad
                                         </div>
                                         {worldDRotationProgress < 1 && (
                                             <div className="mt-2">
@@ -2027,7 +2089,7 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDStressProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDStressProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 8: Left-hand fist stress for 3 seconds
+                                            Task 7: Left-hand fist stress for 3 seconds
                                         </div>
                                         {worldDStressProgress < 1 && (
                                             <div className="mt-2">
@@ -2054,11 +2116,11 @@ if (materialRef.current) {
                         {!worldBUnlocked && !handControlEnabled && (
                             <div className="text-[10px] text-neutral-500">Tip: enable hand control to confirm.</div>
                         )}
-                        {worldBUnlocked && !worldCUnlocked && !handControlEnabled && (
-                            <div className="text-[10px] text-neutral-500">Tip: keep hand control on to confirm Task 4.</div>
+                        {worldBUnlocked && !worldCUnlocked && currentWorld === 'B' && (
+                            <div className="text-[10px] text-neutral-500">Tip: zoom into World B deep zone to enter World C.</div>
                         )}
                         {worldCUnlocked && !worldDUnlocked && !handControlEnabled && (
-                            <div className="text-[10px] text-neutral-500">Tip: keep hand control on to confirm Task 6.</div>
+                            <div className="text-[10px] text-neutral-500">Tip: keep hand control on to confirm Task 5.</div>
                         )}
                         {currentWorld === 'B' && (
                             <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World A{worldCUnlocked ? ', zoom in to enter World C.' : '.'}</div>
