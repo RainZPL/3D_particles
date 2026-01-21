@@ -508,7 +508,7 @@ export function App() {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     const material = new THREE.PointsMaterial({
-      color: 0xaefcff,
+      color: 0xf2d07a,
       size: 2.2,
       transparent: true,
       opacity: 0.6,
@@ -527,34 +527,26 @@ export function App() {
     const group = new THREE.Group();
     group.visible = false;
     const bodyMaterial = new THREE.MeshStandardMaterial({
-      color: 0xdedede,
+      color: 0xd8b24c,
       roughness: 0.85,
       metalness: 0.05,
-    });
-    const grooveMaterial = new THREE.MeshStandardMaterial({
-      color: 0x8a8a8a,
-      roughness: 0.9,
-      metalness: 0.02,
-      emissive: new THREE.Color(0x111111),
-      emissiveIntensity: 0.4,
+      emissive: new THREE.Color(0x3a2500),
+      emissiveIntensity: 0.35,
     });
     const radius = 120;
     const sphereGeometry = new THREE.SphereGeometry(radius, 64, 64);
     const top = new THREE.Mesh(sphereGeometry, bodyMaterial);
     const bottom = new THREE.Mesh(sphereGeometry, bodyMaterial);
-    top.position.y = radius * 0.42;
-    bottom.position.y = -radius * 0.42;
+    top.position.y = radius * 0.32;
+    bottom.position.y = -radius * 0.32;
     top.userData.baseY = top.position.y;
     bottom.userData.baseY = bottom.position.y;
-    const grooveGeometry = new THREE.TorusGeometry(radius * 0.92, radius * 0.08, 16, 80);
-    const groove = new THREE.Mesh(grooveGeometry, grooveMaterial);
-    groove.rotation.x = Math.PI / 2;
     const topSpikeGroup = new THREE.Group();
     const bottomSpikeGroup = new THREE.Group();
     const spikeBaseHeight = 10;
     const spikeGeometry = new THREE.ConeGeometry(3.5, spikeBaseHeight, 8);
     const spikeMaterial = new THREE.MeshStandardMaterial({
-      color: 0xf2f2f2,
+      color: 0xf6df8f,
       roughness: 0.9,
       metalness: 0.05,
     });
@@ -595,15 +587,15 @@ export function App() {
 
     top.add(topSpikeGroup);
     bottom.add(bottomSpikeGroup);
-    group.add(top, bottom, groove);
+    group.add(top, bottom);
     buildWorldDParticles(group);
     sceneRef.current.add(group);
     worldDGroupRef.current = group;
     worldDTopRef.current = top;
     worldDBottomRef.current = bottom;
-    worldDGrooveRef.current = groove;
+    worldDGrooveRef.current = null;
     worldDMaterialRef.current = bodyMaterial;
-    worldDGrooveMaterialRef.current = grooveMaterial;
+    worldDGrooveMaterialRef.current = null;
     worldDReadyRef.current = true;
   }, [buildWorldDParticles, ensureWorldDLights]);
 
@@ -1689,21 +1681,26 @@ const cloneViewState = (state: ViewState) => ({
                                         }
                                         const groupScale = stressActive ? 1 + 0.015 * Math.sin(elapsedTime * 6) : 1;
                                         worldDGroupRef.current.scale.setScalar(groupScale);
-                                        if (worldDMaterialRef.current && worldDGrooveMaterialRef.current) {
+                                        if (worldDMaterialRef.current) {
                                             if (stressActive) {
-                                                worldDMaterialRef.current.color.setHex(0xfafafa);
-                                                worldDMaterialRef.current.emissive.setHex(0x1cffff);
-                                                worldDMaterialRef.current.emissiveIntensity = 0.6 + 0.25 * pulse;
-                                                worldDGrooveMaterialRef.current.color.setHex(0x1a1a1a);
-                                                worldDGrooveMaterialRef.current.emissive.setHex(0x00b3ff);
-                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.5 + 0.2 * pulse;
+                                                worldDMaterialRef.current.color.setHex(0xfff1bf);
+                                                worldDMaterialRef.current.emissive.setHex(0xffc766);
+                                                worldDMaterialRef.current.emissiveIntensity = 0.7 + 0.25 * pulse;
                                             } else {
-                                                worldDMaterialRef.current.color.setHex(0xdedede);
-                                                worldDMaterialRef.current.emissive.setHex(0x111111);
-                                                worldDMaterialRef.current.emissiveIntensity = 0.4;
-                                                worldDGrooveMaterialRef.current.color.setHex(0x8a8a8a);
-                                                worldDGrooveMaterialRef.current.emissive.setHex(0x111111);
-                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.4;
+                                                worldDMaterialRef.current.color.setHex(0xd8b24c);
+                                                worldDMaterialRef.current.emissive.setHex(0x3a2500);
+                                                worldDMaterialRef.current.emissiveIntensity = 0.35;
+                                            }
+                                        }
+                                        if (worldDGrooveMaterialRef.current) {
+                                            if (stressActive) {
+                                                worldDGrooveMaterialRef.current.color.setHex(0x3b2a00);
+                                                worldDGrooveMaterialRef.current.emissive.setHex(0xff9f2a);
+                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.55 + 0.2 * pulse;
+                                            } else {
+                                                worldDGrooveMaterialRef.current.color.setHex(0x9b7a1f);
+                                                worldDGrooveMaterialRef.current.emissive.setHex(0x2a1900);
+                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.35;
                                             }
                                         }
                                     }
@@ -1742,10 +1739,10 @@ const cloneViewState = (state: ViewState) => ({
                                         (geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
                                         const material = worldDParticlesRef.current.material as THREE.PointsMaterial;
                                         if (stressActive) {
-                                            material.color.setHex(0xffffff);
+                                            material.color.setHex(0xfff4cc);
                                             material.opacity = 0.85;
                                         } else {
-                                            material.color.setHex(0xaefcff);
+                                            material.color.setHex(0xf2d07a);
                                             material.opacity = 0.6;
                                         }
                                     }
@@ -2238,4 +2235,3 @@ const ControlSlider: React.FC<{
         </div>
     );
 };
-
