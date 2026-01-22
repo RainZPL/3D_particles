@@ -37,6 +37,7 @@ const WORLD_D_ROTATE_REQUIRED = 1.5;
 const WORLD_D_FIST_THRESHOLD = 0.5;
 const WORLD_D_STRESS_HOLD_MS = 3000;
 const WORLD_D_PARTICLE_COUNT = 600;
+const WORLD_D_CORE_DISTANCE = MIN_ZOOM_DISTANCE + 40;
 const OK_HOLD_MS = 3000;
 const WORLD_SWITCH_COOLDOWN_MS = 350;
 
@@ -73,6 +74,7 @@ export function App() {
   const [worldDRotationProgress, setWorldDRotationProgress] = useState(0);
   const [worldDStressProgress, setWorldDStressProgress] = useState(0);
   const [worldDStressActive, setWorldDStressActive] = useState(false);
+  const [worldDZoomProgress, setWorldDZoomProgress] = useState(0);
   const [, setWorldCLoading] = useState(false);
   const currentWorldRef = useRef<'A' | 'B' | 'C' | 'D'>('A');
   const worldBUnlockedRef = useRef(false);
@@ -94,6 +96,9 @@ export function App() {
   const worldDStressHoldStartRef = useRef<number | null>(null);
   const worldDStressHoldProgressRef = useRef(0);
   const worldDStressActiveRef = useRef(false);
+  const worldDZoomProgressRef = useRef(0);
+  const worldDZoomCompletedRef = useRef(false);
+  const worldDZoomStartDistanceRef = useRef<number | null>(null);
   const worldDFistStrengthRef = useRef(0);
   const worldAImageRef = useRef<string | null>(DEFAULT_IMAGE);
   const worldBImageRef = useRef<string | null>(WORLD_B_IMAGE);
@@ -127,6 +132,7 @@ export function App() {
   const worldCPendingRef = useRef(false);
   const worldCLightsRef = useRef<THREE.Light[] | null>(null);
   const worldDGroupRef = useRef<THREE.Group | null>(null);
+  const worldDCoreGroupRef = useRef<THREE.Group | null>(null);
   const worldDTopRef = useRef<THREE.Mesh | null>(null);
   const worldDBottomRef = useRef<THREE.Mesh | null>(null);
   const worldDGrooveRef = useRef<THREE.Mesh | null>(null);
@@ -564,11 +570,13 @@ export function App() {
       roughnessMap: noiseTexture,
     });
     const radius = 120;
+    const seamOffset = 0.32;
     const sphereGeometry = new THREE.SphereGeometry(radius, 64, 64);
+    const coreGroup = new THREE.Group();
     const top = new THREE.Mesh(sphereGeometry, bodyMaterial);
     const bottom = new THREE.Mesh(sphereGeometry, bodyMaterial);
-    top.position.y = radius * 0.32;
-    bottom.position.y = -radius * 0.32;
+    top.position.y = radius * seamOffset;
+    bottom.position.y = -radius * seamOffset;
     top.userData.baseY = top.position.y;
     bottom.userData.baseY = bottom.position.y;
     const topSpikeGroup = new THREE.Group();
@@ -617,10 +625,39 @@ export function App() {
 
     top.add(topSpikeGroup);
     bottom.add(bottomSpikeGroup);
-    group.add(top, bottom);
-    buildWorldDParticles(group);
+    coreGroup.add(top, bottom);
+    coreGroup.scale.setScalar(1.08);
+    group.add(coreGroup);
+
+    const createSatellite = (direction: THREE.Vector3, distance: number, scale: number) => {
+      const cell = new THREE.Group();
+      const topCell = new THREE.Mesh(sphereGeometry, bodyMaterial);
+      const bottomCell = new THREE.Mesh(sphereGeometry, bodyMaterial);
+      topCell.position.y = radius * seamOffset;
+      bottomCell.position.y = -radius * seamOffset;
+      cell.add(topCell, bottomCell);
+      cell.scale.setScalar(scale);
+      cell.position.copy(direction.normalize().multiplyScalar(distance));
+      return cell;
+    };
+
+    const satellites = [
+      { direction: new THREE.Vector3(1.2, 0.15, -1.0), distance: 520, scale: 0.55 },
+      { direction: new THREE.Vector3(-1.1, 0.2, -0.45), distance: 470, scale: 0.5 },
+      { direction: new THREE.Vector3(0.6, -0.2, -1.25), distance: 540, scale: 0.52 },
+      { direction: new THREE.Vector3(-0.8, -0.25, 1.1), distance: 500, scale: 0.48 },
+      { direction: new THREE.Vector3(1.05, 0.1, 0.85), distance: 490, scale: 0.5 },
+      { direction: new THREE.Vector3(-0.9, 0.35, 0.75), distance: 510, scale: 0.5 },
+    ];
+    satellites.forEach((satellite) => {
+      const cell = createSatellite(satellite.direction, satellite.distance, satellite.scale);
+      group.add(cell);
+    });
+
+    buildWorldDParticles(coreGroup);
     sceneRef.current.add(group);
     worldDGroupRef.current = group;
+    worldDCoreGroupRef.current = coreGroup;
     worldDTopRef.current = top;
     worldDBottomRef.current = bottom;
     worldDGrooveRef.current = null;
@@ -899,21 +936,34 @@ const cloneViewState = (state: ViewState) => ({
             setWorldDStressProgress(0);
             worldDStressActiveRef.current = false;
             setWorldDStressActive(false);
+            worldDZoomProgressRef.current = 0;
+            worldDZoomCompletedRef.current = false;
+            worldDZoomStartDistanceRef.current = null;
+            setWorldDZoomProgress(0);
             worldDLastWristAngleRef.current = null;
             if (defaultViewRef.current) {
                 const initialView = cloneViewState(defaultViewRef.current);
                 const maxDistance = getWorldMaxZoomDistance('D');
-                const offset = initialView.position.clone().sub(initialView.target);
-                const currentDistance = offset.length();
-                if (currentDistance > 0) {
-                    offset.setLength(maxDistance);
-                    initialView.position.copy(initialView.target).add(offset);
+                if (worldDCoreGroupRef.current) {
+                    const corePosition = new THREE.Vector3();
+                    worldDCoreGroupRef.current.getWorldPosition(corePosition);
+                    initialView.target.copy(corePosition);
                 }
+                const offset = initialView.position.clone().sub(initialView.target);
+                offset.y = 0;
+                if (offset.lengthSq() < 1) {
+                    offset.set(0, 0, 1);
+                }
+                offset.setLength(maxDistance);
+                initialView.position.copy(initialView.target).add(offset);
                 worldDViewRef.current = initialView;
                 applyViewState(initialView);
             }
         } else if (worldDViewRef.current) {
             applyViewState(worldDViewRef.current);
+        }
+        if (!worldDZoomCompletedRef.current && cameraRef.current && controlsRef.current) {
+            worldDZoomStartDistanceRef.current = cameraRef.current.position.distanceTo(controlsRef.current.target);
         }
         updateWorldDReturnDistance();
         worldDReturnArmedRef.current = true;
@@ -1205,49 +1255,78 @@ const cloneViewState = (state: ViewState) => ({
 
         if (currentWorldRef.current === 'D') {
             if (leftHand) {
-                const fistStrength = getFistStrength(leftHand);
-                worldDFistStrengthRef.current = THREE.MathUtils.lerp(worldDFistStrengthRef.current, fistStrength, 0.35);
-                const activateThreshold = WORLD_D_FIST_THRESHOLD;
-                const releaseThreshold = WORLD_D_FIST_THRESHOLD * 0.7;
-                const nextStress = worldDStressActiveRef.current
-                    ? worldDFistStrengthRef.current >= releaseThreshold
-                    : worldDFistStrengthRef.current >= activateThreshold;
-                if (nextStress !== worldDStressActiveRef.current) {
-                    worldDStressActiveRef.current = nextStress;
-                    setWorldDStressActive(nextStress);
-                    if (!nextStress && worldDStressHoldProgressRef.current < 1) {
-                        worldDStressHoldStartRef.current = null;
-                        worldDStressHoldProgressRef.current = 0;
-                        setWorldDStressProgress(0);
+                const zoomReady = worldDZoomCompletedRef.current;
+                if (!zoomReady) {
+                    worldDLastWristAngleRef.current = null;
+                    worldDFistStrengthRef.current = 0;
+                    if (worldDStressActiveRef.current) {
+                        worldDStressActiveRef.current = false;
+                        setWorldDStressActive(false);
+                        if (worldDStressHoldProgressRef.current < 1) {
+                            worldDStressHoldStartRef.current = null;
+                            worldDStressHoldProgressRef.current = 0;
+                            setWorldDStressProgress(0);
+                        }
                     }
-                }
-
-                const rotationBlocked = worldDStressActiveRef.current || worldDFistStrengthRef.current >= 0.35;
-                if (!rotationBlocked) {
-                    const wristAngle = getWristRotationAngle(leftHand);
-                    if (wristAngle !== null) {
-                        if (worldDLastWristAngleRef.current !== null && worldDGroupRef.current) {
-                            const delta = Math.atan2(
-                                Math.sin(wristAngle - worldDLastWristAngleRef.current),
-                                Math.cos(wristAngle - worldDLastWristAngleRef.current)
-                            );
-                            worldDGroupRef.current.rotation.y += delta;
-                            worldDRotationAccumRef.current = Math.min(worldDRotationAccumRef.current + Math.abs(delta), WORLD_D_ROTATE_REQUIRED);
-                            const progress = Math.min(worldDRotationAccumRef.current / WORLD_D_ROTATE_REQUIRED, 1);
-                            if (progress >= 1 && worldDRotationProgressRef.current < 1) {
-                                worldDRotationProgressRef.current = 1;
-                                setWorldDRotationProgress(1);
-                            } else if (Math.abs(progress - worldDRotationProgressRef.current) > 0.005) {
-                                worldDRotationProgressRef.current = progress;
-                                setWorldDRotationProgress(progress);
+                } else {
+                    const rotationComplete = worldDRotationProgressRef.current >= 1;
+                    if (rotationComplete) {
+                        const fistStrength = getFistStrength(leftHand);
+                        worldDFistStrengthRef.current = THREE.MathUtils.lerp(worldDFistStrengthRef.current, fistStrength, 0.35);
+                        const activateThreshold = WORLD_D_FIST_THRESHOLD;
+                        const releaseThreshold = WORLD_D_FIST_THRESHOLD * 0.7;
+                        const nextStress = worldDStressActiveRef.current
+                            ? worldDFistStrengthRef.current >= releaseThreshold
+                            : worldDFistStrengthRef.current >= activateThreshold;
+                        if (nextStress !== worldDStressActiveRef.current) {
+                            worldDStressActiveRef.current = nextStress;
+                            setWorldDStressActive(nextStress);
+                            if (!nextStress && worldDStressHoldProgressRef.current < 1) {
+                                worldDStressHoldStartRef.current = null;
+                                worldDStressHoldProgressRef.current = 0;
+                                setWorldDStressProgress(0);
                             }
                         }
-                        worldDLastWristAngleRef.current = wristAngle;
+                    } else {
+                        if (worldDStressActiveRef.current) {
+                            worldDStressActiveRef.current = false;
+                            setWorldDStressActive(false);
+                            if (worldDStressHoldProgressRef.current < 1) {
+                                worldDStressHoldStartRef.current = null;
+                                worldDStressHoldProgressRef.current = 0;
+                                setWorldDStressProgress(0);
+                            }
+                        }
+                        worldDFistStrengthRef.current = 0;
+                    }
+
+                    const rotationBlocked = worldDStressActiveRef.current || worldDFistStrengthRef.current >= 0.35;
+                    if (!rotationBlocked) {
+                        const wristAngle = getWristRotationAngle(leftHand);
+                        if (wristAngle !== null) {
+                            if (worldDLastWristAngleRef.current !== null && worldDCoreGroupRef.current) {
+                                const delta = Math.atan2(
+                                    Math.sin(wristAngle - worldDLastWristAngleRef.current),
+                                    Math.cos(wristAngle - worldDLastWristAngleRef.current)
+                                );
+                                worldDCoreGroupRef.current.rotation.y += delta;
+                                worldDRotationAccumRef.current = Math.min(worldDRotationAccumRef.current + Math.abs(delta), WORLD_D_ROTATE_REQUIRED);
+                                const progress = Math.min(worldDRotationAccumRef.current / WORLD_D_ROTATE_REQUIRED, 1);
+                                if (progress >= 1 && worldDRotationProgressRef.current < 1) {
+                                    worldDRotationProgressRef.current = 1;
+                                    setWorldDRotationProgress(1);
+                                } else if (Math.abs(progress - worldDRotationProgressRef.current) > 0.005) {
+                                    worldDRotationProgressRef.current = progress;
+                                    setWorldDRotationProgress(progress);
+                                }
+                            }
+                            worldDLastWristAngleRef.current = wristAngle;
+                        } else {
+                            worldDLastWristAngleRef.current = null;
+                        }
                     } else {
                         worldDLastWristAngleRef.current = null;
                     }
-                } else {
-                    worldDLastWristAngleRef.current = null;
                 }
             } else {
                 worldDLastWristAngleRef.current = null;
@@ -1417,6 +1496,7 @@ const cloneViewState = (state: ViewState) => ({
     worldDReturnArmedRef.current = false;
     worldDReadyRef.current = false;
     worldDGroupRef.current = null;
+    worldDCoreGroupRef.current = null;
     worldDParticlesRef.current = null;
     worldDParticleDataRef.current = null;
     worldDTopRef.current = null;
@@ -1440,6 +1520,10 @@ const cloneViewState = (state: ViewState) => ({
     setWorldDStressProgress(0);
     worldDStressActiveRef.current = false;
     setWorldDStressActive(false);
+    worldDZoomProgressRef.current = 0;
+    worldDZoomCompletedRef.current = false;
+    worldDZoomStartDistanceRef.current = null;
+    setWorldDZoomProgress(0);
     worldDLastWristAngleRef.current = null;
     worldBUnlockedRef.current = false;
     setWorldBUnlocked(false);
@@ -1517,6 +1601,7 @@ const cloneViewState = (state: ViewState) => ({
             const handUp = new THREE.Vector3();
             const handPan = new THREE.Vector3();
             const handView = new THREE.Vector3();
+            const coreTarget = new THREE.Vector3();
 
             // Animation Loop
             const animate = () => {
@@ -1569,6 +1654,37 @@ const cloneViewState = (state: ViewState) => ({
                 }
 
                                                                 const distToTarget = camera.position.distanceTo(controls.target);
+
+                                                                if (currentWorldRef.current === 'D') {
+                                                                    const startDistance = worldDZoomStartDistanceRef.current ?? distToTarget;
+                                                                    if (worldDZoomStartDistanceRef.current === null) {
+                                                                        worldDZoomStartDistanceRef.current = startDistance;
+                                                                    }
+                                                                    const denom = Math.max(startDistance - WORLD_D_CORE_DISTANCE, 1);
+                                                                    const rawProgress = THREE.MathUtils.clamp((startDistance - distToTarget) / denom, 0, 1);
+                                                                    const progress = distToTarget <= WORLD_D_CORE_DISTANCE ? 1 : rawProgress;
+                                                                    const nextProgress = worldDZoomCompletedRef.current || progress >= 1 ? 1 : progress;
+                                                                    if (progress >= 1 && !worldDZoomCompletedRef.current) {
+                                                                        worldDZoomCompletedRef.current = true;
+                                                                    }
+                                                                    if (Math.abs(nextProgress - worldDZoomProgressRef.current) > 0.01) {
+                                                                        worldDZoomProgressRef.current = nextProgress;
+                                                                        setWorldDZoomProgress(nextProgress);
+                                                                    } else if (worldDZoomCompletedRef.current && worldDZoomProgressRef.current !== 1) {
+                                                                        worldDZoomProgressRef.current = 1;
+                                                                        setWorldDZoomProgress(1);
+                                                                    }
+
+                                                                    if (!worldDZoomCompletedRef.current && worldDCoreGroupRef.current) {
+                                                                        worldDCoreGroupRef.current.getWorldPosition(coreTarget);
+                                                                        const focusStrength = nextProgress > 0.01 ? 0.02 + 0.08 * nextProgress : 0;
+                                                                        if (focusStrength > 0) {
+                                                                            const focusDelta = coreTarget.sub(controls.target).multiplyScalar(focusStrength);
+                                                                            controls.target.add(focusDelta);
+                                                                            camera.position.add(focusDelta);
+                                                                        }
+                                                                    }
+                                                                }
                                 const isDeepZone = distToTarget <= DEEP_ZONE_DISTANCE;
                                 const isWorldA = currentWorldRef.current === 'A';
                                 const isWorldB = currentWorldRef.current === 'B';
@@ -1692,7 +1808,7 @@ const cloneViewState = (state: ViewState) => ({
                                             setWorldDStressProgress(progress);
                                         }
                                     }
-                                    if (worldDGroupRef.current) {
+                                    if (worldDCoreGroupRef.current) {
                                         const pulse = 0.5 + 0.5 * Math.sin(elapsedTime * 6);
                                         const squeeze = stressActive ? 0.86 + 0.05 * Math.sin(elapsedTime * 8) : 1;
                                         const top = worldDTopRef.current;
@@ -1710,7 +1826,7 @@ const cloneViewState = (state: ViewState) => ({
                                             worldDGrooveRef.current.scale.set(1, squeeze, 1);
                                         }
                                         const groupScale = stressActive ? 1 + 0.015 * Math.sin(elapsedTime * 6) : 1;
-                                        worldDGroupRef.current.scale.setScalar(groupScale);
+                                        worldDCoreGroupRef.current.scale.setScalar(groupScale);
                                         if (worldDMaterialRef.current) {
                                             if (stressActive) {
                                                 worldDMaterialRef.current.color.setHex(0xfff1bf);
@@ -2109,12 +2225,41 @@ if (materialRef.current) {
                                 <div className="text-[10px] text-neutral-500 uppercase tracking-widest">Goal</div>
                                 <div className="text-[10px] text-neutral-400">Observe bacterial division under mechanical stress.</div>
                                 <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDZoomProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${worldDZoomProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 6: Zoom into the core cluster
+                                        </div>
+                                        {worldDZoomProgress < 1 && (
+                                            <div className="mt-2">
+                                                <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
+                                                    <span>Core focus progress</span>
+                                                    <span>{Math.round(worldDZoomProgress * 100)}%</span>
+                                                </div>
+                                                <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-emerald-500 transition-[width] duration-150"
+                                                        style={{ width: `${Math.round(worldDZoomProgress * 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+                                        {worldDZoomProgress >= 1 && (
+                                            <div className="text-[10px] text-emerald-400 mt-1">Core focus confirmed</div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="flex items-start gap-3">
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDRotationProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDRotationProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 6: Left-hand wrist rotation &gt;= 1.5 rad
+                                            Task 7: Left-hand wrist rotation &gt;= 1.5 rad
                                         </div>
-                                        {worldDRotationProgress < 1 && (
+                                        {worldDZoomProgress < 1 && (
+                                            <div className="text-[10px] text-neutral-500 mt-1">Zoom into the core to unlock rotation.</div>
+                                        )}
+                                        {worldDZoomProgress >= 1 && worldDRotationProgress < 1 && (
                                             <div className="mt-2">
                                                 <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
                                                     <span>Rotation progress</span>
@@ -2138,12 +2283,15 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDStressProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDStressProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 7: Left-hand fist stress for 3 seconds
+                                            Task 8: Left-hand fist stress for 3 seconds
                                         </div>
-                                        {worldDStressProgress < 1 && (
+                                        {worldDRotationProgress < 1 && (
+                                            <div className="text-[10px] text-neutral-500 mt-1">Complete rotation before stress testing.</div>
+                                        )}
+                                        {worldDRotationProgress >= 1 && worldDStressProgress < 1 && (
                                             <div className="mt-2">
                                                 <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
-                                                    <span>{worldDStressActive ? 'Stress active' : 'Awaiting left-hand fist'}</span>
+                                                    <span>{worldDStressActive ? "Stress active" : "Awaiting left-hand fist"}</span>
                                                     <span>{Math.round(worldDStressProgress * 100)}%</span>
                                                 </div>
                                                 <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
