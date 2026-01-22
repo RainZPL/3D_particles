@@ -482,6 +482,32 @@ export function App() {
     worldDLightsRef.current = [ambient, key, rim];
   }, []);
 
+  const buildWorldDNoiseTexture = useCallback(() => {
+    const size = 128;
+    const data = new Uint8Array(size * size);
+    let idx = 0;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const n1 = Math.sin(x * 0.15) * Math.cos(y * 0.12);
+        const n2 = Math.sin((x + y) * 0.07);
+        const n3 = (Math.random() - 0.5) * 0.4;
+        const v = 0.55 + 0.2 * n1 + 0.15 * n2 + n3;
+        const clamped = Math.max(0, Math.min(1, v));
+        data[idx++] = Math.floor(clamped * 255);
+      }
+    }
+    const texture = new THREE.DataTexture(data, size, size, THREE.RedFormat);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(4, 4);
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    texture.needsUpdate = true;
+    texture.colorSpace = THREE.NoColorSpace;
+    return texture;
+  }, []);
+
   const buildWorldDParticles = useCallback((group: THREE.Group) => {
     const count = WORLD_D_PARTICLE_COUNT;
     const positions = new Float32Array(count * 3);
@@ -526,12 +552,16 @@ export function App() {
     ensureWorldDLights();
     const group = new THREE.Group();
     group.visible = false;
+    const noiseTexture = buildWorldDNoiseTexture();
     const bodyMaterial = new THREE.MeshStandardMaterial({
       color: 0xd8b24c,
-      roughness: 0.85,
+      roughness: 0.9,
       metalness: 0.05,
       emissive: new THREE.Color(0x3a2500),
       emissiveIntensity: 0.35,
+      bumpMap: noiseTexture,
+      bumpScale: 2.2,
+      roughnessMap: noiseTexture,
     });
     const radius = 120;
     const sphereGeometry = new THREE.SphereGeometry(radius, 64, 64);
@@ -550,7 +580,7 @@ export function App() {
       roughness: 0.9,
       metalness: 0.05,
     });
-    const spikeCount = 180;
+    const spikeCount = 0;
     const spikesPerHemisphere = Math.floor(spikeCount / 2);
     const goldenAngle = Math.PI * (3 - Math.sqrt(5));
     const minHemisphereY = 0.2;
@@ -597,7 +627,7 @@ export function App() {
     worldDMaterialRef.current = bodyMaterial;
     worldDGrooveMaterialRef.current = null;
     worldDReadyRef.current = true;
-  }, [buildWorldDParticles, ensureWorldDLights]);
+  }, [buildWorldDParticles, buildWorldDNoiseTexture, ensureWorldDLights]);
 
   const enterWorldD = () => {
     ensureWorldDModel();
