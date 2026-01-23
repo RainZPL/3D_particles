@@ -153,3 +153,30 @@ void main() {
     gl_FragColor = vec4(vColor, uOpacity);
 }
 `;
+
+export const lineFragmentShader = `
+uniform sampler2D uTexture;
+uniform float uThreshold;
+uniform float uOpacity;
+uniform float uGrowth;
+uniform float uLineOpacity;
+
+varying vec2 vUv;
+varying vec3 vColor;
+varying float vBrightness;
+
+void main() {
+    vec4 texColor = texture2D(uTexture, vUv);
+    float brightness = (texColor.r + texColor.g + texColor.b) / 3.0;
+
+    if (brightness < uThreshold) discard;
+
+    float dist = distance(vUv, vec2(0.5));
+    float organicEdge = dist - (brightness * 0.15);
+    if (organicEdge > uGrowth) discard;
+
+    vec3 lineColor = mix(vColor, vec3(1.0), 0.2);
+    float alpha = uOpacity * uLineOpacity * (0.35 + 0.65 * brightness);
+    gl_FragColor = vec4(lineColor, alpha);
+}
+`;

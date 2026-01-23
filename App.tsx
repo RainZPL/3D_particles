@@ -5,7 +5,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
-import { vertexShader, fragmentShader } from './shaders';
+import { vertexShader, fragmentShader, lineFragmentShader } from './shaders';
 import { Camera, RefreshCcw, Upload, Settings, AlertCircle, Hand, Video, VideoOff } from 'lucide-react';
 // Import MediaPipe safely handling ESM export variations
 import * as mpHandsPkg from '@mediapipe/hands';
@@ -21,9 +21,9 @@ const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Ca
 const DEFAULT_IMAGE = "/A.png";
 const WORLD_B_IMAGE = "/B.png";
 const WORLD_C_MODEL = "/C.glb";
-const MIN_ZOOM_DISTANCE = 100;
+const MIN_ZOOM_DISTANCE = 70;
 const MAX_ZOOM_DISTANCE = 1000;
-const DEEP_ZONE_DISTANCE = 100;
+const DEEP_ZONE_DISTANCE = 70;
 const RETURN_ZONE_DISTANCE = 300;
 const RETURN_MARGIN = 60;
 const RETURN_ARM_MARGIN = 20;
@@ -43,7 +43,8 @@ const WORLD_SWITCH_COOLDOWN_MS = 350;
 
 // Fallback in case A.png is missing
 const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1563089145-599997674d42?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80";
-const MAX_GROWTH = 0.85; 
+const MAX_GROWTH = 0.85;
+const LINE_OPACITY_FACTOR = 0.35;
 
 // Zoom Thresholds
 const ZOOM_IN_THRESHOLD = 0.07; // Fingers close together
@@ -120,6 +121,8 @@ export function App() {
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const materialRef = useRef<THREE.ShaderMaterial | null>(null);
+  const lineMeshRef = useRef<THREE.Mesh | null>(null);
+  const lineMaterialRef = useRef<THREE.ShaderMaterial | null>(null);
   const composerRef = useRef<EffectComposer | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const clockRef = useRef<THREE.Clock>(new THREE.Clock());
@@ -127,6 +130,7 @@ export function App() {
   const controlsRef = useRef<OrbitControls | null>(null);
   const pointsRef = useRef<THREE.Points | null>(null);
   const worldCModelRef = useRef<THREE.Object3D | null>(null);
+  const worldCLineRef = useRef<THREE.LineSegments | null>(null);
   const worldCLoadingRef = useRef<Promise<THREE.Object3D> | null>(null);
   const worldCReadyRef = useRef(false);
   const worldCPendingRef = useRef(false);
@@ -169,12 +173,12 @@ export function App() {
 
   // Parameters
   const paramsRef = useRef({
-    displacement: 80,
+    displacement: 25,
     noiseSpeed: 0.2,
     pointSize: 3.5,
-    threshold: 0.15,
+    threshold: 0.1,
     opacity: 0.9,
-    bloomStrength: 0.3,
+    bloomStrength: 0.1,
     growthSpeed: 0.005,
   });
 
@@ -257,9 +261,19 @@ export function App() {
     pointsRef.current.geometry = newGeometry;
     materialRef.current.uniforms.uTexture.value = texture;
     materialRef.current.uniforms.uTexture.needsUpdate = true;
+    if (lineMeshRef.current && lineMaterialRef.current) {
+      lineMeshRef.current.geometry.dispose();
+      lineMeshRef.current.geometry = newGeometry.clone();
+      lineMaterialRef.current.uniforms.uTexture.value = texture;
+      lineMaterialRef.current.uniforms.uTexture.needsUpdate = true;
+      lineMaterialRef.current.uniforms.uGrowth.value = materialRef.current.uniforms.uGrowth.value;
+    }
 
     if (resetGrowth) {
       materialRef.current.uniforms.uGrowth.value = 0.0;
+      if (lineMaterialRef.current) {
+        lineMaterialRef.current.uniforms.uGrowth.value = 0.0;
+      }
       animatingRef.current = true;
       setAnimating(true);
       setGrowth(0);
@@ -381,6 +395,71 @@ export function App() {
     return new THREE.Points(geometry, material);
   }, []);
 
+  const buildWorldCLines = useCallback((model: THREE.Object3D) => {
+    const baseColor = new THREE.Color(0xe6540b);
+    const highlight = new THREE.Color(0xf0a57f);
+    const wireData: { geometry: THREE.WireframeGeometry; matrix: THREE.Matrix4 }[] = [];
+    let totalSegments = 0;
+
+    model.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh;
+        const geometry = mesh.geometry as THREE.BufferGeometry;
+        const wire = new THREE.WireframeGeometry(geometry);
+        const position = wire.getAttribute('position');
+        if (!position) {
+          wire.dispose();
+          return;
+        }
+        totalSegments += position.count / 2;
+        wireData.push({ geometry: wire, matrix: mesh.matrixWorld.clone() });
+      }
+    });
+
+    const targetSegments = 1800;
+    const step = Math.max(1, Math.floor(totalSegments / targetSegments));
+    const positions: number[] = [];
+    const colors: number[] = [];
+    const temp = new THREE.Vector3();
+    let segmentIndex = 0;
+
+    wireData.forEach((item) => {
+      const position = item.geometry.getAttribute('position') as THREE.BufferAttribute;
+      for (let i = 0; i < position.count; i += 2) {
+        if (segmentIndex % step === 0) {
+          temp.fromBufferAttribute(position, i).applyMatrix4(item.matrix);
+          positions.push(temp.x, temp.y, temp.z);
+          temp.fromBufferAttribute(position, i + 1).applyMatrix4(item.matrix);
+          positions.push(temp.x, temp.y, temp.z);
+          const t = Math.random();
+          const color = baseColor.clone().lerp(highlight, 0.35 + 0.65 * t);
+          colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
+        }
+        segmentIndex += 1;
+      }
+      item.geometry.dispose();
+    });
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingSphere();
+
+    const material = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+
+    const lines = new THREE.LineSegments(geometry, material);
+    lines.renderOrder = 1;
+    return lines;
+  }, []);
+
+
   const loadWorldCModel = useCallback(() => {
     if (worldCReadyRef.current && worldCModelRef.current) {
       return Promise.resolve(worldCModelRef.current);
@@ -403,8 +482,14 @@ export function App() {
           model.updateMatrixWorld(true);
           const points = buildWorldCParticles(model);
           points.visible = false;
+          points.renderOrder = 2;
           sceneRef.current.add(points);
           worldCModelRef.current = points;
+
+          const lines = buildWorldCLines(model);
+          lines.visible = false;
+          sceneRef.current.add(lines);
+          worldCLineRef.current = lines;
           worldCReadyRef.current = true;
           worldCLoadingRef.current = null;
           setWorldCLoading(false);
@@ -420,7 +505,7 @@ export function App() {
     });
     worldCLoadingRef.current = promise;
     return promise;
-  }, [ensureWorldCLights, fitWorldCModel, buildWorldCParticles]);
+  }, [ensureWorldCLights, fitWorldCModel, buildWorldCParticles, buildWorldCLines]);
 
   const preloadWorldCModel = useCallback(() => {
     void loadWorldCModel().catch((err) => {
@@ -432,8 +517,14 @@ export function App() {
     if (pointsRef.current) {
       pointsRef.current.visible = world === 'A' || world === 'B';
     }
+    if (lineMeshRef.current) {
+      lineMeshRef.current.visible = world === 'A' || world === 'B';
+    }
     if (worldCModelRef.current) {
       worldCModelRef.current.visible = world === 'C';
+    }
+    if (worldCLineRef.current) {
+      worldCLineRef.current.visible = world === 'C';
     }
     if (worldDGroupRef.current) {
       worldDGroupRef.current.visible = world === 'D';
@@ -706,6 +797,9 @@ const cloneViewState = (state: ViewState) => ({
     syncGrowthRef(value);
     if (materialRef.current) {
       materialRef.current.uniforms.uGrowth.value = value;
+    }
+    if (lineMaterialRef.current) {
+      lineMaterialRef.current.uniforms.uGrowth.value = value;
     }
     if (currentWorldRef.current === 'A' && value >= MAX_GROWTH) {
       initialAGrowthCompletedRef.current = true;
@@ -1424,6 +1518,20 @@ const cloneViewState = (state: ViewState) => ({
         }
         rendererRef.current.dispose();
     }
+    if (lineMeshRef.current) {
+        lineMeshRef.current.geometry.dispose();
+        lineMeshRef.current = null;
+    }
+    if (lineMaterialRef.current) {
+        lineMaterialRef.current.dispose();
+        lineMaterialRef.current = null;
+    }
+    if (worldCLineRef.current) {
+        worldCLineRef.current.geometry.dispose();
+        const material = worldCLineRef.current.material as THREE.Material;
+        material.dispose();
+        worldCLineRef.current = null;
+    }
     rendererRef.current = null;
     sceneRef.current = null;
     materialRef.current = null;
@@ -1452,6 +1560,9 @@ const cloneViewState = (state: ViewState) => ({
 
     const camera = new THREE.PerspectiveCamera(60, width / height, 1, 5000);
     camera.position.set(0, -200, 350);
+    const initialDistance = camera.position.length();
+    const planeNormal = new THREE.Vector3(0, 0, 1).applyEuler(new THREE.Euler(-Math.PI / 1.6, 0, 0));
+    camera.position.copy(planeNormal.multiplyScalar(-initialDistance));
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: false });
@@ -1580,8 +1691,37 @@ const cloneViewState = (state: ViewState) => ({
 
             const mesh = new THREE.Points(geometry, material);
             mesh.rotation.x = -Math.PI / 1.6;
+            mesh.renderOrder = 2;
             scene.add(mesh);
             pointsRef.current = mesh;
+
+            const lineMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0 },
+                    uTexture: { value: texture },
+                    uDisplacementStrength: { value: paramsRef.current.displacement },
+                    uNoiseSpeed: { value: paramsRef.current.noiseSpeed },
+                    uPointSize: { value: paramsRef.current.pointSize },
+                    uThreshold: { value: paramsRef.current.threshold },
+                    uOpacity: { value: paramsRef.current.opacity },
+                    uGrowth: { value: 0.0 },
+                    uLineOpacity: { value: LINE_OPACITY_FACTOR }
+                },
+                vertexShader: vertexShader,
+                fragmentShader: lineFragmentShader,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+                wireframe: true,
+                side: THREE.DoubleSide
+            });
+            lineMaterialRef.current = lineMaterial;
+
+            const lineMesh = new THREE.Mesh(geometry.clone(), lineMaterial);
+            lineMesh.rotation.x = -Math.PI / 1.6;
+            lineMesh.renderOrder = 1;
+            scene.add(lineMesh);
+            lineMeshRef.current = lineMesh;
 
             // Post Processing
             const renderScene = new RenderPass(scene, camera);
@@ -1922,6 +2062,18 @@ if (materialRef.current) {
                     }
                 }
 
+                if (lineMaterialRef.current) {
+                    const growthValue = materialRef.current ? materialRef.current.uniforms.uGrowth.value : lineMaterialRef.current.uniforms.uGrowth.value;
+                    lineMaterialRef.current.uniforms.uTime.value = elapsedTime;
+                    lineMaterialRef.current.uniforms.uDisplacementStrength.value = paramsRef.current.displacement;
+                    lineMaterialRef.current.uniforms.uNoiseSpeed.value = paramsRef.current.noiseSpeed;
+                    lineMaterialRef.current.uniforms.uPointSize.value = paramsRef.current.pointSize;
+                    lineMaterialRef.current.uniforms.uThreshold.value = paramsRef.current.threshold;
+                    lineMaterialRef.current.uniforms.uOpacity.value = paramsRef.current.opacity;
+                    lineMaterialRef.current.uniforms.uGrowth.value = growthValue;
+                    lineMaterialRef.current.uniforms.uLineOpacity.value = LINE_OPACITY_FACTOR;
+                }
+
                 composer.render();
             };
             
@@ -2006,6 +2158,9 @@ if (materialRef.current) {
   const restartAnimation = () => {
       if(materialRef.current) {
           materialRef.current.uniforms.uGrowth.value = 0.0;
+          if (lineMaterialRef.current) {
+              lineMaterialRef.current.uniforms.uGrowth.value = 0.0;
+          }
           setGrowth(0);
           syncGrowthRef(0);
           if (currentWorldRef.current === 'A') {
@@ -2023,6 +2178,9 @@ if (materialRef.current) {
       syncGrowthRef(val);
       if(materialRef.current) {
           materialRef.current.uniforms.uGrowth.value = val;
+      }
+      if (lineMaterialRef.current) {
+          lineMaterialRef.current.uniforms.uGrowth.value = val;
       }
   };
 
@@ -2368,11 +2526,11 @@ if (materialRef.current) {
                             />
                         </div>
 
-                        <ControlSlider label="Displacement" min={0} max={300} initial={80} onChange={(v) => paramsRef.current.displacement = v} />
+                        <ControlSlider label="Displacement" min={0} max={300} initial={25} onChange={(v) => paramsRef.current.displacement = v} />
                         <ControlSlider label="Flow Speed" min={0} max={2} step={0.1} initial={0.2} onChange={(v) => paramsRef.current.noiseSpeed = v} />
                         <ControlSlider label="Particle Size" min={1} max={10} step={0.1} initial={3.5} onChange={(v) => paramsRef.current.pointSize = v} />
-                        <ControlSlider label="Bloom Strength" min={0} max={3} step={0.1} initial={0.3} onChange={(v) => paramsRef.current.bloomStrength = v} />
-                        <ControlSlider label="Threshold" min={0} max={0.5} step={0.01} initial={0.15} onChange={(v) => paramsRef.current.threshold = v} />
+                        <ControlSlider label="Bloom Strength" min={0} max={3} step={0.1} initial={0.1} onChange={(v) => paramsRef.current.bloomStrength = v} />
+                        <ControlSlider label="Threshold" min={0} max={0.5} step={0.01} initial={0.1} onChange={(v) => paramsRef.current.threshold = v} />
                     </div>
                 </div>
             </div>
