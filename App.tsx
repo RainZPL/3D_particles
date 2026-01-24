@@ -37,7 +37,9 @@ const WORLD_D_ROTATE_REQUIRED = 1.5;
 const WORLD_D_FIST_THRESHOLD = 0.5;
 const WORLD_D_STRESS_HOLD_MS = 3000;
 const WORLD_D_PARTICLE_COUNT = 600;
-const WORLD_D_CORE_DISTANCE = MIN_ZOOM_DISTANCE + 40;
+const WORLD_D_MIN_DISTANCE = 300;
+const WORLD_D_CORE_DISTANCE = WORLD_D_MIN_DISTANCE + 20;
+const WORLD_D_ENTRY_DISTANCE = 2400;
 const OK_HOLD_MS = 3000;
 const WORLD_SWITCH_COOLDOWN_MS = 350;
 
@@ -142,6 +144,17 @@ export function App() {
   const worldDGrooveRef = useRef<THREE.Mesh | null>(null);
   const worldDParticlesRef = useRef<THREE.Points | null>(null);
   const worldDParticleDataRef = useRef<{ positions: Float32Array; velocities: Float32Array; basePositions: Float32Array } | null>(null);
+  const worldDFloatersRef = useRef<Array<{
+    group: THREE.Group;
+    base: THREE.Vector3;
+    axis: THREE.Vector3;
+    axis2: THREE.Vector3;
+    amp: number;
+    amp2: number;
+    speed: number;
+    phase: number;
+    spin: number;
+  }>>([]);
   const worldDMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
   const worldDGrooveMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
   const worldDLightsRef = useRef<THREE.Light[] | null>(null);
@@ -166,6 +179,7 @@ export function App() {
   const worldDEntryArmedRef = useRef(false);
   const worldDReturnDistanceRef = useRef<number | null>(null);
   const worldDReturnArmedRef = useRef(false);
+  const wheelZoomOutRef = useRef(0);
   const worldAGrowthRef = useRef(0);
   const worldBGrowthRef = useRef(MAX_GROWTH);
   const defaultMaxDistanceRef = useRef<number | null>(null);
@@ -720,6 +734,46 @@ export function App() {
     coreGroup.scale.setScalar(1.08);
     group.add(coreGroup);
 
+    const floaters: Array<{
+      group: THREE.Group;
+      base: THREE.Vector3;
+      axis: THREE.Vector3;
+      axis2: THREE.Vector3;
+      amp: number;
+      amp2: number;
+      speed: number;
+      phase: number;
+      spin: number;
+    }> = [];
+    let seed = 19.73;
+    const rand = () => {
+      const x = Math.sin(seed) * 10000;
+      seed += 1;
+      return x - Math.floor(x);
+    };
+    const makeAxis = () => {
+      const axis = new THREE.Vector3(rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1);
+      if (axis.lengthSq() < 0.001) {
+        axis.set(0, 1, 0);
+      }
+      return axis.normalize();
+    };
+    const registerFloater = (cell: THREE.Group, basePos: THREE.Vector3, isCore: boolean) => {
+      const axis = makeAxis();
+      const axis2 = makeAxis();
+      if (isCore) {
+        axis.y *= 0.2;
+        axis2.y *= 0.2;
+        axis.normalize();
+        axis2.normalize();
+      }
+      const amp = isCore ? 4 : THREE.MathUtils.lerp(6, 16, rand());
+      const amp2 = isCore ? 2.5 : THREE.MathUtils.lerp(3, 10, rand());
+      const speed = isCore ? 0.12 : THREE.MathUtils.lerp(0.12, 0.28, rand());
+      const phase = rand() * Math.PI * 2;
+      const spin = isCore ? 0 : THREE.MathUtils.lerp(-0.05, 0.05, rand());
+      floaters.push({ group: cell, base: basePos.clone(), axis, axis2, amp, amp2, speed, phase, spin });
+    };
     const createSatellite = (direction: THREE.Vector3, distance: number, scale: number) => {
       const cell = new THREE.Group();
       const topCell = new THREE.Mesh(sphereGeometry, bodyMaterial);
@@ -728,22 +782,37 @@ export function App() {
       bottomCell.position.y = -radius * seamOffset;
       cell.add(topCell, bottomCell);
       cell.scale.setScalar(scale);
+      if (direction.lengthSq() < 0.001) {
+        direction.set(1, 0, 0);
+      }
       cell.position.copy(direction.normalize().multiplyScalar(distance));
       return cell;
     };
 
-    const satellites = [
-      { direction: new THREE.Vector3(1.2, 0.15, -1.0), distance: 520, scale: 0.55 },
-      { direction: new THREE.Vector3(-1.1, 0.2, -0.45), distance: 470, scale: 0.5 },
-      { direction: new THREE.Vector3(0.6, -0.2, -1.25), distance: 540, scale: 0.52 },
-      { direction: new THREE.Vector3(-0.8, -0.25, 1.1), distance: 500, scale: 0.48 },
-      { direction: new THREE.Vector3(1.05, 0.1, 0.85), distance: 490, scale: 0.5 },
-      { direction: new THREE.Vector3(-0.9, 0.35, 0.75), distance: 510, scale: 0.5 },
-    ];
-    satellites.forEach((satellite) => {
-      const cell = createSatellite(satellite.direction, satellite.distance, satellite.scale);
+    registerFloater(coreGroup, coreGroup.position.clone(), true);
+
+    const satelliteCount = 72;
+    const minDistance = 300;
+    const maxDistance = 880;
+    const yCompress = 0.5;
+    for (let i = 0; i < satelliteCount; i++) {
+      const u = rand() * 2 - 1;
+      const theta = rand() * Math.PI * 2;
+      const radial = Math.sqrt(Math.max(0.0001, 1 - u * u));
+      const direction = new THREE.Vector3(
+        Math.cos(theta) * radial,
+        u * yCompress,
+        Math.sin(theta) * radial
+      );
+      direction.add(new THREE.Vector3((rand() * 2 - 1) * 0.25, (rand() * 2 - 1) * 0.1, (rand() * 2 - 1) * 0.25));
+      const distance = THREE.MathUtils.lerp(minDistance, maxDistance, 0.35 + 0.65 * Math.pow(rand(), 0.6));
+      const scale = THREE.MathUtils.lerp(0.32, 0.62, Math.pow(rand(), 0.7));
+      const cell = createSatellite(direction, distance, scale);
+      cell.rotation.set(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI);
       group.add(cell);
-    });
+      registerFloater(cell, cell.position.clone(), false);
+    }
+    worldDFloatersRef.current = floaters;
 
     buildWorldDParticles(coreGroup);
     sceneRef.current.add(group);
@@ -814,14 +883,20 @@ const cloneViewState = (state: ViewState) => ({
       return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_C_MAX_DISTANCE_FACTOR;
     }
     if (world === 'D') {
-      return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_D_MAX_DISTANCE_FACTOR;
+      const base = (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_D_MAX_DISTANCE_FACTOR;
+      return Math.max(base, WORLD_D_ENTRY_DISTANCE);
     }
     return MAX_ZOOM_DISTANCE;
   };
 
+  const getWorldMinZoomDistance = (world: 'A' | 'B' | 'C' | 'D') => {
+    if (world === 'D') return WORLD_D_MIN_DISTANCE;
+    return MIN_ZOOM_DISTANCE;
+  };
+
   const applyZoomLimits = (world: 'A' | 'B' | 'C' | 'D') => {
     if (!controlsRef.current) return;
-    controlsRef.current.minDistance = MIN_ZOOM_DISTANCE;
+    controlsRef.current.minDistance = getWorldMinZoomDistance(world);
     controlsRef.current.maxDistance = getWorldMaxZoomDistance(world);
   };
 
@@ -1020,6 +1095,9 @@ const cloneViewState = (state: ViewState) => ({
         worldCReturnArmedRef.current = true;
         worldDEntryArmedRef.current = false;
     } else if (nextWorld === 'D') {
+        const maxDistance = getWorldMaxZoomDistance('D');
+        applyZoomLimits('D');
+        const shouldResetView = true;
         if (!worldDVisitedRef.current) {
             worldDVisitedRef.current = true;
             worldDRotationAccumRef.current = 0;
@@ -1035,9 +1113,10 @@ const cloneViewState = (state: ViewState) => ({
             worldDZoomStartDistanceRef.current = null;
             setWorldDZoomProgress(0);
             worldDLastWristAngleRef.current = null;
+        }
+        if (shouldResetView) {
             if (defaultViewRef.current) {
                 const initialView = cloneViewState(defaultViewRef.current);
-                const maxDistance = getWorldMaxZoomDistance('D');
                 if (worldDCoreGroupRef.current) {
                     const corePosition = new THREE.Vector3();
                     worldDCoreGroupRef.current.getWorldPosition(corePosition);
@@ -1579,6 +1658,13 @@ const cloneViewState = (state: ViewState) => ({
     controls.enableZoom = true;
     controlsRef.current = controls;
 
+    const handleWheel = (event: WheelEvent) => {
+        if (event.deltaY > 0) {
+            wheelZoomOutRef.current = performance.now() + 240;
+        }
+    };
+    renderer.domElement.addEventListener('wheel', handleWheel, { passive: true });
+
     const initialView: ViewState = {
         position: camera.position.clone(),
         target: controls.target.clone(),
@@ -1610,6 +1696,7 @@ const cloneViewState = (state: ViewState) => ({
     worldDCoreGroupRef.current = null;
     worldDParticlesRef.current = null;
     worldDParticleDataRef.current = null;
+    worldDFloatersRef.current = [];
     worldDTopRef.current = null;
     worldDBottomRef.current = null;
     worldDGrooveRef.current = null;
@@ -1742,12 +1829,17 @@ const cloneViewState = (state: ViewState) => ({
             const handPan = new THREE.Vector3();
             const handView = new THREE.Vector3();
             const coreTarget = new THREE.Vector3();
+            const floatOffset = new THREE.Vector3();
+            const floatOffset2 = new THREE.Vector3();
+            let lastFrameTime = 0;
 
             // Animation Loop
             const animate = () => {
                 animationFrameRef.current = requestAnimationFrame(animate);
                 
                 const elapsedTime = clockRef.current.getElapsedTime();
+                const frameDelta = Math.min(elapsedTime - lastFrameTime, 0.05);
+                lastFrameTime = elapsedTime;
                 
                 // Only auto-rotate if hands aren't controlling it to avoid fighting
                 // Also update damping
@@ -1817,11 +1909,17 @@ const cloneViewState = (state: ViewState) => ({
 
                                                                     if (!worldDZoomCompletedRef.current && worldDCoreGroupRef.current) {
                                                                         worldDCoreGroupRef.current.getWorldPosition(coreTarget);
-                                                                        const focusStrength = nextProgress > 0.01 ? 0.02 + 0.08 * nextProgress : 0;
+                                                                        const focusStrength = nextProgress > 0.01 ? 0.03 + 0.1 * nextProgress : 0;
                                                                         if (focusStrength > 0) {
                                                                             const focusDelta = coreTarget.sub(controls.target).multiplyScalar(focusStrength);
                                                                             controls.target.add(focusDelta);
                                                                             camera.position.add(focusDelta);
+                                                                        }
+                                                                        const verticalDelta = coreTarget.y - controls.target.y;
+                                                                        if (Math.abs(verticalDelta) > 0.001) {
+                                                                            const verticalStep = verticalDelta * (0.06 + 0.1 * nextProgress);
+                                                                            controls.target.y += verticalStep;
+                                                                            camera.position.y += verticalStep;
                                                                         }
                                                                     }
                                                                 }
@@ -1868,7 +1966,8 @@ const cloneViewState = (state: ViewState) => ({
                                 const now = performance.now();
                                 const distDelta = lastZoomDistanceRef.current === null ? 0 : distToTarget - lastZoomDistanceRef.current;
                                 lastZoomDistanceRef.current = distToTarget;
-                                const zoomOutIntent = rightHandZoomTargetRef.current < -0.2 || distDelta > 0.2;
+                                const wheelZoomOut = now < wheelZoomOutRef.current;
+                                const zoomOutIntent = rightHandZoomTargetRef.current < -0.2 || distDelta > 0.2 || wheelZoomOut;
 
                                 if (now >= worldSwitchCooldownRef.current) {
                                     const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
@@ -1895,7 +1994,7 @@ const cloneViewState = (state: ViewState) => ({
 
                                     const returnDistanceD = worldDReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
                                     if (currentWorldRef.current === 'D') {
-                                        const armDistanceD = Math.max(returnDistanceD - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                        const armDistanceD = Math.max(returnDistanceD - RETURN_ARM_MARGIN, getWorldMinZoomDistance('D'));
                                         if (!worldDReturnArmedRef.current && distToTarget < armDistanceD) {
                                             worldDReturnArmedRef.current = true;
                                         }
@@ -1936,6 +2035,17 @@ const cloneViewState = (state: ViewState) => ({
                                 }
 
                                 if (currentWorldRef.current === 'D') {
+                                    if (worldDFloatersRef.current.length) {
+                                        worldDFloatersRef.current.forEach((floater) => {
+                                            const t = elapsedTime * floater.speed + floater.phase;
+                                            floatOffset.copy(floater.axis).multiplyScalar(Math.sin(t) * floater.amp);
+                                            floatOffset2.copy(floater.axis2).multiplyScalar(Math.cos(t * 0.7) * floater.amp2);
+                                            floater.group.position.copy(floater.base).add(floatOffset).add(floatOffset2);
+                                            if (floater.spin !== 0) {
+                                                floater.group.rotation.y += floater.spin * frameDelta;
+                                            }
+                                        });
+                                    }
                                     const stressActive = worldDStressActiveRef.current;
                                     if (stressActive) {
                                         if (!worldDStressHoldStartRef.current) {
@@ -2120,6 +2230,7 @@ if (materialRef.current) {
 
     return () => {
         window.removeEventListener('resize', handleResize);
+        renderer.domElement.removeEventListener('wheel', handleWheel);
     };
 
   }, [buildGeometryFromTexture, preloadTexture, preloadWorldCModel, ensureWorldDModel]);
