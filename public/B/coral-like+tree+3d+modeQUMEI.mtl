@@ -1,0 +1,20 @@
+# Exported from Nomad Sculpt
+
+newmtl tripo_node_6b78f9bd-69fd-4699-8cb0-77f8e4025763
+ map_Kd coral-liketree3dmodel_basecolor.jpg
+ map_roughness coral-liketree3dmodel_rm_1_roughness.jpg
+ map_Pr coral-liketree3dmodel_rm_1_roughness.jpg
+ map_metallic coral-liketree3dmodel_rm_2_metalness.jpg
+ map_Pm coral-liketree3dmodel_rm_2_metalness.jpg
+ map_tangentSpaceNormal coral-liketree3dmodel_normal.jpg
+ map_bump coral-liketree3dmodel_normal.jpg
+ norm coral-liketree3dmodel_normal.jpg
+ bump coral-liketree3dmodel_normal.jpg
+ Kd 1.000000 1.000000 1.000000
+ Pr 0.500000
+ Pm 0.000000
+
+newmtl 球体
+ Kd 1.000000 1.000000 1.000000
+ Pr 0.250000
+ Pm 0.000000
