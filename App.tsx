@@ -5,6 +5,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader';
 import { vertexShader, fragmentShader, lineFragmentShader } from './shaders';
 import { Camera, RefreshCcw, Upload, Settings, AlertCircle, Hand, Video, VideoOff } from 'lucide-react';
 // Import MediaPipe safely handling ESM export variations
@@ -20,6 +21,9 @@ const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Ca
 // Use a simple relative path. The file should be in the public root.
 const DEFAULT_IMAGE = "/A.png";
 const WORLD_B_IMAGE = "/B.png";
+const WORLD_B_MODEL = "/B/coral-like+tree+3d+modeQUMEI.obj";
+const WORLD_B_TEXTURE = "/B/coral-liketree3dmodel_basecolor.jpg";
+const WORLD_B_BLOOM_BOOST = 0.05;
 const WORLD_C_MODEL = "/C.glb";
 const MIN_ZOOM_DISTANCE = 70;
 const MAX_ZOOM_DISTANCE = 1000;
@@ -30,6 +34,7 @@ const RETURN_ARM_MARGIN = 20;
 const REENTER_ARM_MARGIN = 20;
 const REENTER_ARM_MARGIN_C = 20;
 const WORLD_B_MAX_DISTANCE_FACTOR = 1.1;
+const WORLD_B_MIN_DISTANCE = 180;
 const WORLD_C_MAX_DISTANCE_FACTOR = 1.1;
 const REENTER_ARM_MARGIN_D = 20;
 const WORLD_D_MAX_DISTANCE_FACTOR = 1.05;
@@ -137,6 +142,14 @@ export function App() {
   const worldCReadyRef = useRef(false);
   const worldCPendingRef = useRef(false);
   const worldCLightsRef = useRef<THREE.Light[] | null>(null);
+  const worldBModelRef = useRef<THREE.Object3D | null>(null);
+  const worldBLoadingRef = useRef<Promise<THREE.Object3D> | null>(null);
+  const worldBReadyRef = useRef(false);
+  const worldBLightsRef = useRef<THREE.Light[] | null>(null);
+  const worldBMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const worldBCenterRef = useRef<THREE.Vector3 | null>(null);
+  const worldBInitialViewAppliedRef = useRef(false);
+  const worldBEntryDistanceRef = useRef<number | null>(null);
   const worldDGroupRef = useRef<THREE.Group | null>(null);
   const worldDCoreGroupRef = useRef<THREE.Group | null>(null);
   const worldDTopRef = useRef<THREE.Mesh | null>(null);
@@ -521,6 +534,126 @@ export function App() {
     return promise;
   }, [ensureWorldCLights, fitWorldCModel, buildWorldCParticles, buildWorldCLines]);
 
+  const ensureWorldBLights = useCallback(() => {
+    if (!sceneRef.current) return;
+    if (worldBLightsRef.current) return;
+    const ambient = new THREE.AmbientLight(0xffffff, 1.05);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x2b1e0f, 0.85);
+    const key = new THREE.DirectionalLight(0xffffff, 2.2);
+    key.position.set(8, 12, 10);
+    const fill = new THREE.DirectionalLight(0xfff0d0, 1.4);
+    fill.position.set(-8, 4, 6);
+    ambient.visible = false;
+    hemi.visible = false;
+    key.visible = false;
+    fill.visible = false;
+    sceneRef.current.add(ambient, hemi, key, fill);
+    worldBLightsRef.current = [ambient, hemi, key, fill];
+  }, []);
+
+  const fitWorldBModel = useCallback((model: THREE.Object3D) => {
+    const box = new THREE.Box3().setFromObject(model);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const target = 320;
+    const scale = target / maxDim;
+    model.scale.setScalar(scale);
+    box.setFromObject(model);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    model.position.sub(center);
+    worldBCenterRef.current = new THREE.Vector3(0, 0, 0);
+  }, []);
+
+  const applyWorldBInitialView = useCallback((model: THREE.Object3D) => {
+    if (!cameraRef.current || !controlsRef.current) return;
+    const box = new THREE.Box3().setFromObject(model);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const maxDistance = getWorldMaxZoomDistance('B');
+    const distance = Math.max(maxDistance, maxDim * 2.4);
+    cameraRef.current.position.set(center.x, center.y, center.z + distance);
+    controlsRef.current.target.copy(center);
+    controlsRef.current.update();
+    worldBViewRef.current = {
+      position: cameraRef.current.position.clone(),
+      target: controlsRef.current.target.clone(),
+    };
+    worldBInitialViewAppliedRef.current = true;
+  }, []);
+
+  const loadWorldBModel = useCallback(() => {
+    if (worldBReadyRef.current && worldBModelRef.current) {
+      return Promise.resolve(worldBModelRef.current);
+    }
+    if (worldBLoadingRef.current) {
+      return worldBLoadingRef.current;
+    }
+    if (!sceneRef.current) {
+      return Promise.reject(new Error("Scene not ready"));
+    }
+    ensureWorldBLights();
+    const loader = new OBJLoader();
+    const promise = new Promise<THREE.Object3D>((resolve, reject) => {
+      loader.load(
+        WORLD_B_MODEL,
+        async (obj) => {
+          try {
+            const texture = await loadTexture(WORLD_B_TEXTURE);
+            texture.colorSpace = THREE.SRGBColorSpace;
+            const material = new THREE.MeshStandardMaterial({
+              color: 0xffffff,
+              map: texture,
+              roughness: 0.55,
+              metalness: 0.12,
+              emissive: new THREE.Color(0x8c5b1f),
+              emissiveIntensity: 0.45,
+            });
+            worldBMaterialRef.current = material;
+            obj.traverse((child) => {
+              if ((child as THREE.Mesh).isMesh) {
+                const mesh = child as THREE.Mesh;
+                mesh.material = material;
+                mesh.castShadow = false;
+                mesh.receiveShadow = false;
+              }
+            });
+            fitWorldBModel(obj);
+            obj.visible = false;
+            sceneRef.current?.add(obj);
+            worldBModelRef.current = obj;
+            worldBReadyRef.current = true;
+            worldBLoadingRef.current = null;
+            if (currentWorldRef.current === 'B' && !worldBInitialViewAppliedRef.current) {
+              applyWorldBInitialView(obj);
+            }
+            resolve(obj);
+          } catch (err) {
+            worldBLoadingRef.current = null;
+            reject(err);
+          }
+        },
+        undefined,
+        (err) => {
+          worldBLoadingRef.current = null;
+          reject(err);
+        }
+      );
+    });
+    worldBLoadingRef.current = promise;
+    return promise;
+  }, [ensureWorldBLights, fitWorldBModel, loadTexture, applyWorldBInitialView]);
+
+  const preloadWorldBModel = useCallback(() => {
+    void loadWorldBModel().catch((err) => {
+      console.warn("Failed to preload World B model", err);
+    });
+  }, [loadWorldBModel]);
+
   const preloadWorldCModel = useCallback(() => {
     void loadWorldCModel().catch((err) => {
       console.warn("Failed to preload World C model", err);
@@ -529,54 +662,46 @@ export function App() {
 
   const setWorldVisibility = (world: 'A' | 'B' | 'C' | 'D') => {
     if (pointsRef.current) {
-      pointsRef.current.visible = world === 'A' || world === 'B';
+      pointsRef.current.visible = world === 'A';
     }
     if (lineMeshRef.current) {
-      lineMeshRef.current.visible = world === 'A' || world === 'B';
+      lineMeshRef.current.visible = world === 'A';
+    }
+    if (worldBModelRef.current) {
+      worldBModelRef.current.visible = world === 'B';
     }
     if (worldCModelRef.current) {
-      worldCModelRef.current.visible = world === 'C';
+      worldCModelRef.current.visible = false;
     }
     if (worldCLineRef.current) {
-      worldCLineRef.current.visible = world === 'C';
+      worldCLineRef.current.visible = false;
     }
     if (worldDGroupRef.current) {
-      worldDGroupRef.current.visible = world === 'D';
+      worldDGroupRef.current.visible = world === 'C';
+    }
+    if (worldBLightsRef.current) {
+      worldBLightsRef.current.forEach((light) => {
+        light.visible = world === 'B';
+      });
     }
     if (worldCLightsRef.current) {
       worldCLightsRef.current.forEach((light) => {
-        light.visible = world === 'C';
+        light.visible = false;
       });
     }
     if (worldDLightsRef.current) {
       worldDLightsRef.current.forEach((light) => {
-        light.visible = world === 'D';
+        light.visible = world === 'C';
       });
     }
   };
 
+
   const enterWorldC = () => {
-    if (worldCReadyRef.current) {
-      switchWorld('C');
-      return;
-    }
-    worldCPendingRef.current = true;
-    setWorldCLoading(true);
-    void loadWorldCModel()
-      .then(() => {
-        if (!worldCPendingRef.current) return;
-        worldCPendingRef.current = false;
-        setWorldCLoading(false);
-        if (currentWorldRef.current === 'B') {
-          switchWorld('C');
-        }
-      })
-      .catch((err) => {
-        console.warn("Failed to load World C model", err);
-        worldCPendingRef.current = false;
-        setWorldCLoading(false);
-      });
+    ensureWorldDModel();
+    switchWorld('C');
   };
+
 
   const ensureWorldDLights = useCallback(() => {
     if (!sceneRef.current) return;
@@ -817,6 +942,7 @@ export function App() {
     buildWorldDParticles(coreGroup);
     sceneRef.current.add(group);
     worldDGroupRef.current = group;
+    group.visible = currentWorldRef.current === 'C';
     worldDCoreGroupRef.current = coreGroup;
     worldDTopRef.current = top;
     worldDBottomRef.current = bottom;
@@ -826,12 +952,7 @@ export function App() {
     worldDReadyRef.current = true;
   }, [buildWorldDParticles, buildWorldDNoiseTexture, ensureWorldDLights]);
 
-  const enterWorldD = () => {
-    ensureWorldDModel();
-    switchWorld('D');
-  };
-
-const cloneViewState = (state: ViewState) => ({
+  const cloneViewState = (state: ViewState) => ({
     position: state.position.clone(),
     target: state.target.clone(),
   });
@@ -879,20 +1000,21 @@ const cloneViewState = (state: ViewState) => ({
     if (world === 'B') {
       return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_B_MAX_DISTANCE_FACTOR;
     }
-    if (world === 'C') {
-      return (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_C_MAX_DISTANCE_FACTOR;
-    }
-    if (world === 'D') {
+    if (world === 'C' || world === 'D') {
       const base = (defaultMaxDistanceRef.current ?? MAX_ZOOM_DISTANCE) * WORLD_D_MAX_DISTANCE_FACTOR;
       return Math.max(base, WORLD_D_ENTRY_DISTANCE);
     }
     return MAX_ZOOM_DISTANCE;
   };
 
+
   const getWorldMinZoomDistance = (world: 'A' | 'B' | 'C' | 'D') => {
-    if (world === 'D') return WORLD_D_MIN_DISTANCE;
+    if (world === 'B') return WORLD_B_MIN_DISTANCE;
+    if (world === 'C' || world === 'D') return WORLD_D_MIN_DISTANCE;
     return MIN_ZOOM_DISTANCE;
   };
+
+
 
   const applyZoomLimits = (world: 'A' | 'B' | 'C' | 'D') => {
     if (!controlsRef.current) return;
@@ -917,7 +1039,7 @@ const cloneViewState = (state: ViewState) => ({
   const updateWorldDReturnDistance = () => {
     if (!cameraRef.current || !controlsRef.current) return;
     const distToTarget = cameraRef.current.position.distanceTo(controlsRef.current.target);
-    const maxDistance = getWorldMaxZoomDistance('D');
+    const maxDistance = getWorldMaxZoomDistance('C');
     worldDReturnDistanceRef.current = Math.min(distToTarget + RETURN_MARGIN, maxDistance);
   };
 
@@ -929,7 +1051,7 @@ const cloneViewState = (state: ViewState) => ({
       } else if (currentWorldRef.current === 'B') {
         worldBViewRef.current = viewState;
       } else if (currentWorldRef.current === 'C') {
-        worldCViewRef.current = viewState;
+        worldDViewRef.current = viewState;
       } else {
         worldDViewRef.current = viewState;
       }
@@ -995,11 +1117,7 @@ const cloneViewState = (state: ViewState) => ({
     if (currentWorldRef.current === nextWorld) return;
     const previousWorld = currentWorldRef.current;
 
-    if (nextWorld === 'C' && !worldCReadyRef.current) {
-        enterWorldC();
-        return;
-    }
-    if (nextWorld === 'D' && !worldDReadyRef.current) {
+    if (nextWorld === 'C' && !worldDReadyRef.current) {
         ensureWorldDModel();
     }
 
@@ -1014,7 +1132,7 @@ const cloneViewState = (state: ViewState) => ({
     setCurrentWorld(nextWorld);
     worldSwitchCooldownRef.current = performance.now() + WORLD_SWITCH_COOLDOWN_MS;
     lastZoomDistanceRef.current = null;
-    if (previousWorld === 'D' && nextWorld !== 'D') {
+    if (previousWorld === 'C' && nextWorld !== 'C') {
         worldDStressActiveRef.current = false;
         worldDStressHoldStartRef.current = null;
         if (worldDStressHoldProgressRef.current < 1) {
@@ -1025,40 +1143,49 @@ const cloneViewState = (state: ViewState) => ({
         worldDFistStrengthRef.current = 0;
         worldDLastWristAngleRef.current = null;
     }
-    if (nextWorld === 'A' || nextWorld === 'B') {
-        const nextImage = nextWorld === 'A' ? worldAImageRef.current : worldBImageRef.current;
+    if (nextWorld === 'A') {
+        const nextImage = worldAImageRef.current;
         if (nextImage) {
-            const isDefaultTexture = nextImage === DEFAULT_IMAGE || nextImage === WORLD_B_IMAGE;
+            const isDefaultTexture = nextImage === DEFAULT_IMAGE;
             void swapTexture(nextImage, { resetGrowth: false, isDefault: isDefaultTexture });
-            const preloadTarget = nextWorld === 'A' ? worldBImageRef.current : worldAImageRef.current;
+            const preloadTarget = worldBImageRef.current;
             preloadTexture(preloadTarget);
-            preloadWorldCModel();
+            preloadWorldBModel();
             ensureWorldDModel();
         }
-    }
+        if (worldAViewRef.current) {
+            applyViewState(worldAViewRef.current);
+        }
+    } else if (nextWorld === 'B') {
 
-    setWorldVisibility(nextWorld);
-
-    if (nextWorld === 'B') {
         const fromWorldC = previousWorld === 'C';
         if (!worldBVisitedRef.current) {
             worldBVisitedRef.current = true;
-            if (defaultViewRef.current) {
-                const initialView = cloneViewState(defaultViewRef.current);
-                const maxDistance = getWorldMaxZoomDistance('B');
-                const offset = initialView.position.clone().sub(initialView.target);
-                const currentDistance = offset.length();
-                if (currentDistance > 0) {
-                    offset.setLength(maxDistance);
-                    initialView.position.copy(initialView.target).add(offset);
-                }
-                worldBViewRef.current = initialView;
-                applyViewState(initialView);
-            }
-        } else {
+        }
+        const applyWorldBView = (model?: THREE.Object3D) => {
             if (worldBViewRef.current) {
                 applyViewState(worldBViewRef.current);
+                worldBInitialViewAppliedRef.current = true;
+                return;
             }
+            const targetModel = model ?? worldBModelRef.current;
+            if (targetModel) {
+                worldBInitialViewAppliedRef.current = false;
+                applyWorldBInitialView(targetModel);
+            }
+        };
+        if (worldBReadyRef.current && worldBModelRef.current) {
+            applyWorldBView(worldBModelRef.current);
+            setWorldVisibility('B');
+        } else {
+            void loadWorldBModel().then((model) => {
+                if (currentWorldRef.current === 'B') {
+                    applyWorldBView(model);
+                    setWorldVisibility('B');
+                }
+            }).catch((err) => {
+                console.warn('Failed to load World B model', err);
+            });
         }
         setGrowthInstant(MAX_GROWTH);
         if (fromWorldC) {
@@ -1067,36 +1194,13 @@ const cloneViewState = (state: ViewState) => ({
             updateWorldBReturnDistance();
         }
         worldBReturnArmedRef.current = true;
+        worldBEntryArmedRef.current = false;
+        worldBEntryDistanceRef.current = null;
         worldCEntryArmedRef.current = false;
     } else if (nextWorld === 'C') {
-        const fromWorldD = previousWorld === 'D';
-        if (!worldCVisitedRef.current) {
-            worldCVisitedRef.current = true;
-            if (defaultViewRef.current) {
-                const initialView = cloneViewState(defaultViewRef.current);
-                const maxDistance = getWorldMaxZoomDistance('C');
-                const offset = initialView.position.clone().sub(initialView.target);
-                const currentDistance = offset.length();
-                if (currentDistance > 0) {
-                    offset.setLength(maxDistance);
-                    initialView.position.copy(initialView.target).add(offset);
-                }
-                worldCViewRef.current = initialView;
-                applyViewState(initialView);
-            }
-        } else if (worldCViewRef.current) {
-            applyViewState(worldCViewRef.current);
-        }
-        if (fromWorldD) {
-            worldCReturnDistanceRef.current = getWorldMaxZoomDistance('C');
-        } else {
-            updateWorldCReturnDistance();
-        }
-        worldCReturnArmedRef.current = true;
-        worldDEntryArmedRef.current = false;
-    } else if (nextWorld === 'D') {
-        const maxDistance = getWorldMaxZoomDistance('D');
-        applyZoomLimits('D');
+
+        const maxDistance = getWorldMaxZoomDistance('C');
+        applyZoomLimits('C');
         const shouldResetView = true;
         if (!worldDVisitedRef.current) {
             worldDVisitedRef.current = true;
@@ -1141,6 +1245,7 @@ const cloneViewState = (state: ViewState) => ({
         updateWorldDReturnDistance();
         worldDReturnArmedRef.current = true;
     } else {
+
         if (worldAViewRef.current) {
             applyViewState(worldAViewRef.current);
         }
@@ -1152,6 +1257,8 @@ const cloneViewState = (state: ViewState) => ({
         }
         worldBEntryArmedRef.current = false;
     }
+
+    setWorldVisibility(nextWorld);
 
     applyZoomLimits(nextWorld);
     resetOkHold();
@@ -1318,12 +1425,12 @@ const cloneViewState = (state: ViewState) => ({
         setOkProgressD(progress);
     }
     if (progress >= 1) {
-        unlockWorldD();
-        enterWorldD();
+        unlockWorldC();
+        enterWorldC();
     }
   };
 
-  // --- Hand Tracking Logic ---
+// --- Hand Tracking Logic ---
 
   useEffect(() => {
     if (!handControlEnabled || !videoRef.current) return;
@@ -1426,7 +1533,7 @@ const cloneViewState = (state: ViewState) => ({
         updateOkHoldC(okDetected);
         updateOkHoldD(okDetected);
 
-        if (currentWorldRef.current === 'D') {
+        if (currentWorldRef.current === 'C') {
             if (leftHand) {
                 const zoomReady = worldDZoomCompletedRef.current;
                 if (!zoomReady) {
@@ -1740,8 +1847,8 @@ const cloneViewState = (state: ViewState) => ({
     okHoldProgressCRef.current = 0;
     setOkHoldProgressC(0);
     defaultMaxDistanceRef.current = camera.position.distanceTo(controls.target);
-    controls.minDistance = MIN_ZOOM_DISTANCE;
-    controls.maxDistance = MAX_ZOOM_DISTANCE;
+    controls.minDistance = getWorldMinZoomDistance('A');
+    controls.maxDistance = getWorldMaxZoomDistance('A');
     initialAGrowthCompletedRef.current = false;
 
     // Texture Loading
@@ -1865,6 +1972,7 @@ const cloneViewState = (state: ViewState) => ({
                     controls.target.add(handPan);
 
                     const handDistToTarget = camera.position.distanceTo(controls.target);
+                    const handMinZoomDistance = getWorldMinZoomDistance(currentWorldRef.current);
                     const handMaxZoomDistance = getWorldMaxZoomDistance(currentWorldRef.current);
                     const zoomSpeedIn = 15;
                     const zoomSpeedOut = 15;
@@ -1873,7 +1981,7 @@ const cloneViewState = (state: ViewState) => ({
 
                     if (zoomStep !== 0) {
                         camera.getWorldDirection(handView);
-                        if (zoomStep > 0 && handDistToTarget > MIN_ZOOM_DISTANCE) {
+                        if (zoomStep > 0 && handDistToTarget > handMinZoomDistance) {
                             camera.position.addScaledVector(handView, zoomStep);
                         } else if (zoomStep < 0 && handDistToTarget < handMaxZoomDistance) {
                             camera.position.addScaledVector(handView, zoomStep);
@@ -1887,7 +1995,7 @@ const cloneViewState = (state: ViewState) => ({
 
                                                                 const distToTarget = camera.position.distanceTo(controls.target);
 
-                                                                if (currentWorldRef.current === 'D') {
+                                                                if (currentWorldRef.current === 'C') {
                                                                     const startDistance = worldDZoomStartDistanceRef.current ?? distToTarget;
                                                                     if (worldDZoomStartDistanceRef.current === null) {
                                                                         worldDZoomStartDistanceRef.current = startDistance;
@@ -1923,11 +2031,15 @@ const cloneViewState = (state: ViewState) => ({
                                                                         }
                                                                     }
                                                                 }
-                                const isDeepZone = distToTarget <= DEEP_ZONE_DISTANCE;
-                                const isWorldA = currentWorldRef.current === 'A';
+                                                                const isWorldA = currentWorldRef.current === 'A';
                                 const isWorldB = currentWorldRef.current === 'B';
-                                const isWorldC = currentWorldRef.current === 'C';
-                                if (isWorldA || isWorldB || isWorldC) {
+                                const deepZoneDistance = isWorldA
+                                    ? DEEP_ZONE_DISTANCE
+                                    : isWorldB
+                                        ? getWorldMinZoomDistance('B') + 10
+                                        : null;
+                                const isDeepZone = deepZoneDistance !== null && distToTarget <= deepZoneDistance;
+                                if (deepZoneDistance !== null) {
                                     if (isDeepZone !== deepZoneActiveRef.current) {
                                         deepZoneActiveRef.current = isDeepZone;
                                         if (isDeepZone) {
@@ -1939,14 +2051,6 @@ const cloneViewState = (state: ViewState) => ({
                                                 deepZoneReachedBRef.current = true;
                                                 setDeepZoneReachedB(true);
                                             }
-                                            if (isWorldB && !worldCUnlockedRef.current) {
-                                                unlockWorldC();
-                                                enterWorldC();
-                                            }
-                                            if (isWorldC && !deepZoneReachedCRef.current) {
-                                                deepZoneReachedCRef.current = true;
-                                                setDeepZoneReachedC(true);
-                                            }
                                         } else {
                                             if (isWorldA) {
                                                 resetOkHold();
@@ -1954,25 +2058,25 @@ const cloneViewState = (state: ViewState) => ({
                                             if (isWorldB) {
                                                 resetOkHoldC();
                                             }
-                                            if (isWorldC) {
-                                                resetOkHoldD();
-                                            }
                                         }
                                     }
                                 } else if (deepZoneActiveRef.current) {
                                     deepZoneActiveRef.current = false;
+                                    resetOkHold();
+                                    resetOkHoldC();
+                                    resetOkHoldD();
                                 }
 
-                                const now = performance.now();
+const now = performance.now();
                                 const distDelta = lastZoomDistanceRef.current === null ? 0 : distToTarget - lastZoomDistanceRef.current;
                                 lastZoomDistanceRef.current = distToTarget;
                                 const wheelZoomOut = now < wheelZoomOutRef.current;
                                 const zoomOutIntent = rightHandZoomTargetRef.current < -0.2 || distDelta > 0.2 || wheelZoomOut;
 
-                                if (now >= worldSwitchCooldownRef.current) {
+                                                                if (now >= worldSwitchCooldownRef.current) {
                                     const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
                                     if (currentWorldRef.current === 'B') {
-                                        const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
+                                        const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, getWorldMinZoomDistance('B'));
                                         if (!worldBReturnArmedRef.current && distToTarget < armDistance) {
                                             worldBReturnArmedRef.current = true;
                                         }
@@ -1980,31 +2084,20 @@ const cloneViewState = (state: ViewState) => ({
                                             switchWorld('A');
                                         }
                                     }
-
-                                    const returnDistanceC = worldCReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
+                                
+                                    const returnDistanceC = worldDReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
                                     if (currentWorldRef.current === 'C') {
-                                        const armDistanceC = Math.max(returnDistanceC - RETURN_ARM_MARGIN, MIN_ZOOM_DISTANCE);
-                                        if (!worldCReturnArmedRef.current && distToTarget < armDistanceC) {
-                                            worldCReturnArmedRef.current = true;
-                                        }
-                                        if (worldCReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistanceC) {
-                                            switchWorld('B');
-                                        }
-                                    }
-
-                                    const returnDistanceD = worldDReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
-                                    if (currentWorldRef.current === 'D') {
-                                        const armDistanceD = Math.max(returnDistanceD - RETURN_ARM_MARGIN, getWorldMinZoomDistance('D'));
-                                        if (!worldDReturnArmedRef.current && distToTarget < armDistanceD) {
+                                        const armDistanceC = Math.max(returnDistanceC - RETURN_ARM_MARGIN, getWorldMinZoomDistance('C'));
+                                        if (!worldDReturnArmedRef.current && distToTarget < armDistanceC) {
                                             worldDReturnArmedRef.current = true;
                                         }
-                                        if (worldDReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistanceD) {
-                                            switchWorld('C');
+                                        if (worldDReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistanceC) {
+                                            switchWorld('B');
                                         }
                                     }
                                 }
 
-                                if (currentWorldRef.current === 'A' && worldBUnlockedRef.current) {
+if (currentWorldRef.current === 'A' && worldBUnlockedRef.current) {
                                     const reenterDistance = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN;
                                     if (!worldBEntryArmedRef.current && distToTarget > reenterDistance) {
                                         worldBEntryArmedRef.current = true;
@@ -2014,8 +2107,8 @@ const cloneViewState = (state: ViewState) => ({
                                     }
                                 }
 
-                                if (currentWorldRef.current === 'B' && worldCUnlockedRef.current) {
-                                    const reenterDistanceC = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN_C;
+                                                                if (currentWorldRef.current === 'B' && worldCUnlockedRef.current) {
+                                    const reenterDistanceC = getWorldMinZoomDistance('B') + REENTER_ARM_MARGIN_C + 10;
                                     if (!worldCEntryArmedRef.current && distToTarget > reenterDistanceC) {
                                         worldCEntryArmedRef.current = true;
                                     }
@@ -2024,17 +2117,7 @@ const cloneViewState = (state: ViewState) => ({
                                     }
                                 }
 
-                                if (currentWorldRef.current === 'C' && worldDUnlockedRef.current) {
-                                    const reenterDistanceD = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN_D;
-                                    if (!worldDEntryArmedRef.current && distToTarget > reenterDistanceD) {
-                                        worldDEntryArmedRef.current = true;
-                                    }
-                                    if (worldDEntryArmedRef.current && isDeepZone) {
-                                        enterWorldD();
-                                    }
-                                }
-
-                                if (currentWorldRef.current === 'D') {
+if (currentWorldRef.current === 'C') {
                                     if (worldDFloatersRef.current.length) {
                                         worldDFloatersRef.current.forEach((floater) => {
                                             const t = elapsedTime * floater.speed + floater.phase;
@@ -2196,7 +2279,7 @@ if (materialRef.current) {
             setLoading(false);
             const preloadTarget = currentWorldRef.current === 'A' ? worldBImageRef.current : worldAImageRef.current;
             preloadTexture(preloadTarget);
-            preloadWorldCModel();
+            preloadWorldBModel();
             ensureWorldDModel();
         },
         undefined, // onProgress
@@ -2233,9 +2316,9 @@ if (materialRef.current) {
         renderer.domElement.removeEventListener('wheel', handleWheel);
     };
 
-  }, [buildGeometryFromTexture, preloadTexture, preloadWorldCModel, ensureWorldDModel]);
+  }, [buildGeometryFromTexture, preloadTexture, preloadWorldBModel, ensureWorldDModel]);
 
-  useEffect(() => {
+    useEffect(() => {
      if (!imageSrc) {
          setLoading(false);
      } else {
@@ -2446,50 +2529,36 @@ if (materialRef.current) {
                                     </div>
                                 </div>
 
-                            </>
-                        )}
-
-                                                {worldCUnlocked && (
-                            <>
                                 <div className="flex items-start gap-3">
-                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${deepZoneReachedC ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldCUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
-                                        <div className={`text-[11px] ${deepZoneReachedC ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 4: Enter World C deep zone
+                                        <div className={`text-[11px] ${worldCUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 4: Left-hand OK for 3 seconds
                                         </div>
-                                        <div className="text-[10px] text-neutral-500">Zoom into World C to unlock the next gate.</div>
-                                    </div>
-                                </div>
-
-                                <div className="flex items-start gap-3">
-                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
-                                    <div className="flex-1">
-                                        <div className={`text-[11px] ${worldDUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 5: Left-hand OK for 3 seconds
-                                        </div>
-                                        {!worldDUnlocked && (
+                                        {!worldCUnlocked && (
                                             <div className="mt-2">
                                                 <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
                                                     <span>Confirm progress</span>
-                                                    <span>{Math.round(okHoldProgressD * 100)}%</span>
+                                                    <span>{Math.round(okHoldProgressC * 100)}%</span>
                                                 </div>
                                                 <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
                                                     <div
                                                         className="h-full bg-emerald-500 transition-[width] duration-150"
-                                                        style={{ width: `${Math.round(okHoldProgressD * 100)}%` }}
+                                                        style={{ width: `${Math.round(okHoldProgressC * 100)}%` }}
                                                     />
                                                 </div>
                                             </div>
                                         )}
-                                        {worldDUnlocked && (
-                                            <div className="text-[10px] text-emerald-400 mt-1">World D unlocked</div>
+                                        {worldCUnlocked && (
+                                            <div className="text-[10px] text-emerald-400 mt-1">World C unlocked</div>
                                         )}
                                     </div>
                                 </div>
                             </>
                         )}
 
-                        {currentWorld === 'D' && (
+                        {currentWorld === 'C' && (
+
                             <>
                                 <div className="text-[10px] text-neutral-500 uppercase tracking-widest">Goal</div>
                                 <div className="text-[10px] text-neutral-400">Observe bacterial division under mechanical stress.</div>
@@ -2497,7 +2566,7 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDZoomProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDZoomProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 6: Zoom into the core cluster
+                                            Task 5: Zoom into the core cluster
                                         </div>
                                         {worldDZoomProgress < 1 && (
                                             <div className="mt-2">
@@ -2523,7 +2592,7 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDRotationProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDRotationProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 7: Left-hand wrist rotation &gt;= 1.5 rad
+                                            Task 6: Left-hand wrist rotation &gt;= 1.5 rad
                                         </div>
                                         {worldDZoomProgress < 1 && (
                                             <div className="text-[10px] text-neutral-500 mt-1">Zoom into the core to unlock rotation.</div>
@@ -2552,7 +2621,7 @@ if (materialRef.current) {
                                     <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDStressProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
                                         <div className={`text-[11px] ${worldDStressProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
-                                            Task 8: Left-hand fist stress for 3 seconds
+                                            Task 7: Left-hand fist stress for 3 seconds
                                         </div>
                                         {worldDRotationProgress < 1 && (
                                             <div className="text-[10px] text-neutral-500 mt-1">Complete rotation before stress testing.</div>
@@ -2585,17 +2654,14 @@ if (materialRef.current) {
                         {worldBUnlocked && !worldCUnlocked && currentWorld === 'B' && (
                             <div className="text-[10px] text-neutral-500">Tip: zoom into World B deep zone to enter World C.</div>
                         )}
-                        {worldCUnlocked && !worldDUnlocked && !handControlEnabled && (
-                            <div className="text-[10px] text-neutral-500">Tip: keep hand control on to confirm Task 5.</div>
+                        {worldBUnlocked && !worldCUnlocked && !handControlEnabled && (
+                            <div className="text-[10px] text-neutral-500">Tip: enable hand control to confirm Task 4.</div>
                         )}
                         {currentWorld === 'B' && (
                             <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World A{worldCUnlocked ? ', zoom in to enter World C.' : '.'}</div>
                         )}
                         {currentWorld === 'C' && (
-                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World B{worldDUnlocked ? ', zoom in to enter World D.' : '.'}</div>
-                        )}
-                        {currentWorld === 'D' && (
-                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World C.</div>
+                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World B.</div>
                         )}
                     </div>
                 </div>
