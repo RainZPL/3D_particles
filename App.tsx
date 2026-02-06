@@ -45,6 +45,10 @@ const WORLD_D_PARTICLE_COUNT = 600;
 const WORLD_D_MIN_DISTANCE = 300;
 const WORLD_D_CORE_DISTANCE = WORLD_D_MIN_DISTANCE + 20;
 const WORLD_D_ENTRY_DISTANCE = 2400;
+const WORLD_D_SPLIT_ANIM_MS = 1200;
+const WORLD_D_SPLIT_SCALE_FACTOR = 0.74;
+const WORLD_D_SPLIT_BASE_OFFSET = 120;
+const WORLD_D_MAX_SPLIT_CELLS = 64;
 const OK_HOLD_MS = 3000;
 const WORLD_SWITCH_COOLDOWN_MS = 350;
 
@@ -60,6 +64,14 @@ const ZOOM_IN_RANGE = 0.045;
 const ZOOM_OUT_RANGE = 0.14;
 
 type ViewState = { position: THREE.Vector3; target: THREE.Vector3 };
+type WorldDCoreCell = {
+  group: THREE.Group;
+  top: THREE.Mesh;
+  bottom: THREE.Mesh;
+  baseOffset: THREE.Vector3;
+  targetOffset: THREE.Vector3;
+  baseScale: number;
+};
 
 export function App() {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -170,6 +182,14 @@ export function App() {
   }>>([]);
   const worldDMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
   const worldDGrooveMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const worldDCoreCellsRef = useRef<WorldDCoreCell[]>([]);
+  const worldDSplitAnimatingRef = useRef(false);
+  const worldDSplitStartRef = useRef<number | null>(null);
+  const worldDSplitGenerationRef = useRef(0);
+  const worldDSplitTriggerLatchRef = useRef(false);
+  const worldDCellGeometryRef = useRef<THREE.SphereGeometry | null>(null);
+  const worldDCellRadiusRef = useRef(120);
+  const worldDCellSeamOffsetRef = useRef(0.32);
   const worldDLightsRef = useRef<THREE.Light[] | null>(null);
   const worldDReadyRef = useRef(false);
   const textureCacheRef = useRef<Record<string, THREE.Texture>>({});
@@ -782,12 +802,101 @@ export function App() {
     worldDParticleDataRef.current = { positions, velocities, basePositions };
   }, []);
 
+  const buildWorldDCoreCell = useCallback((position: THREE.Vector3, scale: number): WorldDCoreCell | null => {
+    const geometry = worldDCellGeometryRef.current;
+    const material = worldDMaterialRef.current;
+    if (!geometry || !material) return null;
+
+    const seam = worldDCellRadiusRef.current * worldDCellSeamOffsetRef.current;
+    const cellGroup = new THREE.Group();
+    const top = new THREE.Mesh(geometry, material);
+    const bottom = new THREE.Mesh(geometry, material);
+    top.position.y = seam;
+    bottom.position.y = -seam;
+    top.userData.baseY = top.position.y;
+    bottom.userData.baseY = bottom.position.y;
+    cellGroup.add(top, bottom);
+    cellGroup.position.copy(position);
+    cellGroup.scale.setScalar(scale);
+
+    return {
+      group: cellGroup,
+      top,
+      bottom,
+      baseOffset: position.clone(),
+      targetOffset: position.clone(),
+      baseScale: scale,
+    };
+  }, []);
+
+  const triggerWorldDSplit = useCallback(() => {
+    const coreGroup = worldDCoreGroupRef.current;
+    const cells = worldDCoreCellsRef.current;
+    if (!coreGroup || cells.length === 0) return;
+
+    if (cells.length >= WORLD_D_MAX_SPLIT_CELLS) {
+      worldDSplitTriggerLatchRef.current = true;
+      worldDStressHoldStartRef.current = null;
+      worldDStressHoldProgressRef.current = 0;
+      setWorldDStressProgress(0);
+      worldDStressActiveRef.current = false;
+      setWorldDStressActive(false);
+      return;
+    }
+
+    const generation = worldDSplitGenerationRef.current;
+    const spacing = WORLD_D_SPLIT_BASE_OFFSET * Math.pow(WORLD_D_SPLIT_SCALE_FACTOR, generation * 0.7);
+    const nextCells: WorldDCoreCell[] = [];
+
+    cells.forEach((cell, idx) => {
+      const base = cell.baseOffset.clone();
+      const angle = ((idx + 0.5) / Math.max(1, cells.length)) * Math.PI * 2 + generation * 0.37;
+      const axis = new THREE.Vector3(
+        Math.cos(angle),
+        Math.sin(angle * 1.3) * 0.22,
+        Math.sin(angle)
+      ).normalize();
+      const offset = axis.multiplyScalar(spacing);
+      const nextScale = cell.baseScale * WORLD_D_SPLIT_SCALE_FACTOR;
+
+      const childA = buildWorldDCoreCell(base, nextScale);
+      const childB = buildWorldDCoreCell(base, nextScale);
+      if (!childA || !childB) return;
+
+      childA.targetOffset.copy(base).add(offset);
+      childB.targetOffset.copy(base).sub(offset);
+
+      coreGroup.add(childA.group, childB.group);
+      nextCells.push(childA, childB);
+      coreGroup.remove(cell.group);
+    });
+
+    if (!nextCells.length) return;
+
+    worldDCoreCellsRef.current = nextCells;
+    worldDTopRef.current = nextCells[0].top;
+    worldDBottomRef.current = nextCells[0].bottom;
+    worldDSplitGenerationRef.current += 1;
+    worldDSplitAnimatingRef.current = true;
+    worldDSplitStartRef.current = performance.now();
+    worldDSplitTriggerLatchRef.current = true;
+
+    worldDStressHoldStartRef.current = null;
+    worldDStressHoldProgressRef.current = 0;
+    setWorldDStressProgress(0);
+    worldDStressActiveRef.current = false;
+    setWorldDStressActive(false);
+    worldDFistStrengthRef.current = 0;
+  }, [buildWorldDCoreCell]);
+
   const ensureWorldDModel = useCallback(() => {
     if (worldDReadyRef.current) return;
     if (!sceneRef.current) return;
     ensureWorldDLights();
+
     const group = new THREE.Group();
     group.visible = false;
+
     const noiseTexture = buildWorldDNoiseTexture();
     const bodyMaterial = new THREE.MeshStandardMaterial({
       color: 0xd8b24c,
@@ -799,63 +908,19 @@ export function App() {
       bumpScale: 2.2,
       roughnessMap: noiseTexture,
     });
+
     const radius = 120;
     const seamOffset = 0.32;
     const sphereGeometry = new THREE.SphereGeometry(radius, 64, 64);
+    worldDCellGeometryRef.current = sphereGeometry;
+    worldDCellRadiusRef.current = radius;
+    worldDCellSeamOffsetRef.current = seamOffset;
+    worldDMaterialRef.current = bodyMaterial;
+
     const coreGroup = new THREE.Group();
-    const top = new THREE.Mesh(sphereGeometry, bodyMaterial);
-    const bottom = new THREE.Mesh(sphereGeometry, bodyMaterial);
-    top.position.y = radius * seamOffset;
-    bottom.position.y = -radius * seamOffset;
-    top.userData.baseY = top.position.y;
-    bottom.userData.baseY = bottom.position.y;
-    const topSpikeGroup = new THREE.Group();
-    const bottomSpikeGroup = new THREE.Group();
-    const spikeBaseHeight = 10;
-    const spikeGeometry = new THREE.ConeGeometry(3.5, spikeBaseHeight, 8);
-    const spikeMaterial = new THREE.MeshStandardMaterial({
-      color: 0xf6df8f,
-      roughness: 0.9,
-      metalness: 0.05,
-    });
-    const spikeCount = 0;
-    const spikesPerHemisphere = Math.floor(spikeCount / 2);
-    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-    const minHemisphereY = 0.2;
-    const normal = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-
-    for (let i = 0; i < spikesPerHemisphere; i++) {
-      const t = (i + 0.5) / spikesPerHemisphere;
-      const y = minHemisphereY + (1 - minHemisphereY) * t;
-      const radiusXZ = Math.sqrt(Math.max(0, 1 - y * y));
-      const theta = goldenAngle * i;
-      normal.set(Math.cos(theta) * radiusXZ, y, Math.sin(theta) * radiusXZ);
-      const height = spikeBaseHeight * (0.85 + 0.3 * ((i % 7) / 6));
-      const cone = new THREE.Mesh(spikeGeometry, spikeMaterial);
-      cone.scale.set(1, height / spikeBaseHeight, 1);
-      cone.position.copy(normal).multiplyScalar(radius + height * 0.5);
-      cone.quaternion.setFromUnitVectors(up, normal);
-      topSpikeGroup.add(cone);
-    }
-
-    for (let i = 0; i < spikesPerHemisphere; i++) {
-      const t = (i + 0.5) / spikesPerHemisphere;
-      const y = -(minHemisphereY + (1 - minHemisphereY) * t);
-      const radiusXZ = Math.sqrt(Math.max(0, 1 - y * y));
-      const theta = goldenAngle * (i + spikesPerHemisphere * 0.5);
-      normal.set(Math.cos(theta) * radiusXZ, y, Math.sin(theta) * radiusXZ);
-      const height = spikeBaseHeight * (0.85 + 0.3 * ((i % 7) / 6));
-      const cone = new THREE.Mesh(spikeGeometry, spikeMaterial);
-      cone.scale.set(1, height / spikeBaseHeight, 1);
-      cone.position.copy(normal).multiplyScalar(radius + height * 0.5);
-      cone.quaternion.setFromUnitVectors(up, normal);
-      bottomSpikeGroup.add(cone);
-    }
-
-    top.add(topSpikeGroup);
-    bottom.add(bottomSpikeGroup);
-    coreGroup.add(top, bottom);
+    const coreCell = buildWorldDCoreCell(new THREE.Vector3(0, 0, 0), 1);
+    if (!coreCell) return;
+    coreGroup.add(coreCell.group);
     coreGroup.scale.setScalar(1.08);
     group.add(coreGroup);
 
@@ -870,12 +935,14 @@ export function App() {
       phase: number;
       spin: number;
     }> = [];
+
     let seed = 19.73;
     const rand = () => {
       const x = Math.sin(seed) * 10000;
       seed += 1;
       return x - Math.floor(x);
     };
+
     const makeAxis = () => {
       const axis = new THREE.Vector3(rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1);
       if (axis.lengthSq() < 0.001) {
@@ -883,6 +950,7 @@ export function App() {
       }
       return axis.normalize();
     };
+
     const registerFloater = (cell: THREE.Group, basePos: THREE.Vector3, isCore: boolean) => {
       const axis = makeAxis();
       const axis2 = makeAxis();
@@ -899,6 +967,7 @@ export function App() {
       const spin = isCore ? 0 : THREE.MathUtils.lerp(-0.05, 0.05, rand());
       floaters.push({ group: cell, base: basePos.clone(), axis, axis2, amp, amp2, speed, phase, spin });
     };
+
     const createSatellite = (direction: THREE.Vector3, distance: number, scale: number) => {
       const cell = new THREE.Group();
       const topCell = new THREE.Mesh(sphereGeometry, bodyMaterial);
@@ -937,20 +1006,25 @@ export function App() {
       group.add(cell);
       registerFloater(cell, cell.position.clone(), false);
     }
+
     worldDFloatersRef.current = floaters;
+    worldDCoreCellsRef.current = [coreCell];
+    worldDSplitAnimatingRef.current = false;
+    worldDSplitStartRef.current = null;
+    worldDSplitGenerationRef.current = 0;
+    worldDSplitTriggerLatchRef.current = false;
 
     buildWorldDParticles(coreGroup);
     sceneRef.current.add(group);
     worldDGroupRef.current = group;
     group.visible = currentWorldRef.current === 'C';
     worldDCoreGroupRef.current = coreGroup;
-    worldDTopRef.current = top;
-    worldDBottomRef.current = bottom;
+    worldDTopRef.current = coreCell.top;
+    worldDBottomRef.current = coreCell.bottom;
     worldDGrooveRef.current = null;
-    worldDMaterialRef.current = bodyMaterial;
     worldDGrooveMaterialRef.current = null;
     worldDReadyRef.current = true;
-  }, [buildWorldDParticles, buildWorldDNoiseTexture, ensureWorldDLights]);
+  }, [buildWorldDCoreCell, buildWorldDParticles, buildWorldDNoiseTexture, ensureWorldDLights]);
 
   const cloneViewState = (state: ViewState) => ({
     position: state.position.clone(),
@@ -1217,6 +1291,10 @@ export function App() {
             worldDZoomStartDistanceRef.current = null;
             setWorldDZoomProgress(0);
             worldDLastWristAngleRef.current = null;
+            worldDSplitAnimatingRef.current = false;
+            worldDSplitStartRef.current = null;
+            worldDSplitGenerationRef.current = 0;
+            worldDSplitTriggerLatchRef.current = false;
         }
         if (shouldResetView) {
             if (defaultViewRef.current) {
@@ -1809,6 +1887,14 @@ export function App() {
     worldDGrooveRef.current = null;
     worldDMaterialRef.current = null;
     worldDGrooveMaterialRef.current = null;
+    worldDCoreCellsRef.current = [];
+    worldDSplitAnimatingRef.current = false;
+    worldDSplitStartRef.current = null;
+    worldDSplitGenerationRef.current = 0;
+    worldDSplitTriggerLatchRef.current = false;
+    worldDCellGeometryRef.current = null;
+    worldDCellRadiusRef.current = 120;
+    worldDCellSeamOffsetRef.current = 0.32;
     worldDLightsRef.current = null;
     worldDUnlockedRef.current = false;
     setWorldDUnlocked(false);
@@ -2129,6 +2215,27 @@ if (currentWorldRef.current === 'C') {
                                             }
                                         });
                                     }
+
+                                    if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null) {
+                                        const splitElapsed = performance.now() - worldDSplitStartRef.current;
+                                        const splitProgress = THREE.MathUtils.clamp(splitElapsed / WORLD_D_SPLIT_ANIM_MS, 0, 1);
+                                        const eased = 1 - Math.pow(1 - splitProgress, 3);
+                                        worldDCoreCellsRef.current.forEach((cell, idx) => {
+                                            cell.group.position.lerpVectors(cell.baseOffset, cell.targetOffset, eased);
+                                            const wobble = 1 + (1 - splitProgress) * 0.04 * Math.sin(elapsedTime * 9 + idx * 0.9);
+                                            cell.group.scale.setScalar(cell.baseScale * wobble);
+                                        });
+                                        if (splitProgress >= 1) {
+                                            worldDSplitAnimatingRef.current = false;
+                                            worldDSplitStartRef.current = null;
+                                            worldDCoreCellsRef.current.forEach((cell) => {
+                                                cell.baseOffset.copy(cell.targetOffset);
+                                                cell.group.position.copy(cell.targetOffset);
+                                                cell.group.scale.setScalar(cell.baseScale);
+                                            });
+                                        }
+                                    }
+
                                     const stressActive = worldDStressActiveRef.current;
                                     if (stressActive) {
                                         if (!worldDStressHoldStartRef.current) {
@@ -2140,24 +2247,25 @@ if (currentWorldRef.current === 'C') {
                                             worldDStressHoldProgressRef.current = progress;
                                             setWorldDStressProgress(progress);
                                         }
+                                        if (progress >= 1 && !worldDSplitAnimatingRef.current && !worldDSplitTriggerLatchRef.current) {
+                                            triggerWorldDSplit();
+                                        }
+                                    } else if (worldDSplitTriggerLatchRef.current) {
+                                        worldDSplitTriggerLatchRef.current = false;
                                     }
+
                                     if (worldDCoreGroupRef.current) {
                                         const pulse = 0.5 + 0.5 * Math.sin(elapsedTime * 6);
                                         const squeeze = stressActive ? 0.86 + 0.05 * Math.sin(elapsedTime * 8) : 1;
-                                        const top = worldDTopRef.current;
-                                        const bottom = worldDBottomRef.current;
-                                        if (top && bottom) {
-                                            const baseTop = (top.userData.baseY as number) ?? top.position.y;
-                                            const baseBottom = (bottom.userData.baseY as number) ?? bottom.position.y;
-                                            top.position.y = baseTop * squeeze;
-                                            bottom.position.y = baseBottom * squeeze;
-                                            const scaleY = stressActive ? 0.9 + 0.05 * Math.sin(elapsedTime * 9) : 1;
-                                            top.scale.set(1, scaleY, 1);
-                                            bottom.scale.set(1, scaleY, 1);
-                                        }
-                                        if (worldDGrooveRef.current) {
-                                            worldDGrooveRef.current.scale.set(1, squeeze, 1);
-                                        }
+                                        const scaleY = stressActive ? 0.9 + 0.05 * Math.sin(elapsedTime * 9) : 1;
+                                        worldDCoreCellsRef.current.forEach((cell) => {
+                                            const baseTop = (cell.top.userData.baseY as number) ?? cell.top.position.y;
+                                            const baseBottom = (cell.bottom.userData.baseY as number) ?? cell.bottom.position.y;
+                                            cell.top.position.y = baseTop * squeeze;
+                                            cell.bottom.position.y = baseBottom * squeeze;
+                                            cell.top.scale.set(1, scaleY, 1);
+                                            cell.bottom.scale.set(1, scaleY, 1);
+                                        });
                                         const groupScale = stressActive ? 1 + 0.015 * Math.sin(elapsedTime * 6) : 1;
                                         worldDCoreGroupRef.current.scale.setScalar(groupScale);
                                         if (worldDMaterialRef.current) {
@@ -2171,18 +2279,8 @@ if (currentWorldRef.current === 'C') {
                                                 worldDMaterialRef.current.emissiveIntensity = 0.35;
                                             }
                                         }
-                                        if (worldDGrooveMaterialRef.current) {
-                                            if (stressActive) {
-                                                worldDGrooveMaterialRef.current.color.setHex(0x3b2a00);
-                                                worldDGrooveMaterialRef.current.emissive.setHex(0xff9f2a);
-                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.55 + 0.2 * pulse;
-                                            } else {
-                                                worldDGrooveMaterialRef.current.color.setHex(0x9b7a1f);
-                                                worldDGrooveMaterialRef.current.emissive.setHex(0x2a1900);
-                                                worldDGrooveMaterialRef.current.emissiveIntensity = 0.35;
-                                            }
-                                        }
                                     }
+
                                     if (worldDParticlesRef.current && worldDParticleDataRef.current) {
                                         const { positions, velocities, basePositions } = worldDParticleDataRef.current;
                                         const pull = stressActive ? 0.006 : 0.004;
@@ -2316,7 +2414,7 @@ if (materialRef.current) {
         renderer.domElement.removeEventListener('wheel', handleWheel);
     };
 
-  }, [buildGeometryFromTexture, preloadTexture, preloadWorldBModel, ensureWorldDModel]);
+  }, [buildGeometryFromTexture, preloadTexture, preloadWorldBModel, ensureWorldDModel, triggerWorldDSplit]);
 
     useEffect(() => {
      if (!imageSrc) {
