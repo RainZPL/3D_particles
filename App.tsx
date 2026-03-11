@@ -5,7 +5,6 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
-import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader';
 import { vertexShader, fragmentShader, lineFragmentShader } from './shaders';
 import { Camera, RefreshCcw, Upload, Settings, AlertCircle, Hand, Video, VideoOff } from 'lucide-react';
 // Import MediaPipe safely handling ESM export variations
@@ -21,8 +20,14 @@ const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Ca
 // Use a simple relative path. The file should be in the public root.
 const DEFAULT_IMAGE = "/A.png";
 const WORLD_B_IMAGE = "/B.png";
-const WORLD_B_MODEL = "/B/coral-like+tree+3d+modeQUMEI.obj";
-const WORLD_B_TEXTURE = "/B/coral-liketree3dmodel_basecolor.jpg";
+const WORLD_B_MODEL = encodeURI("/B_animation/\u5b62\u5b50\u751f\u957f\u52a8\u753b.glb");
+const WORLD_B_BRANCH_COLOR = encodeURI("/B_animation/\u679d\u5e72\u8272\u5f69.png");
+const WORLD_B_BRANCH_GLOSS = encodeURI("/B_animation/\u679d\u5e72\u5149\u6cfd.png");
+const WORLD_B_BRANCH_TRANSMISSION = encodeURI("/B_animation/\u679d\u5e72\u900f\u5c04.png");
+const WORLD_B_SPORE_COLOR = encodeURI("/B_animation/\u5b62\u5b50\u8272\u5f69.png");
+const WORLD_B_SPORE_GLOSS = encodeURI("/B_animation/\u5b62\u5b50\u5149\u6cfd.png");
+const WORLD_B_SPORE_TRANSMISSION = encodeURI("/B_animation/\u5b62\u5b50\u900f\u5c04.png");
+const WORLD_B_TARGET_SIZE = 320;
 const WORLD_B_BLOOM_BOOST = 0.05;
 const WORLD_C_MODEL = "/C.glb";
 const MIN_ZOOM_DISTANCE = 70;
@@ -64,6 +69,24 @@ const ZOOM_IN_RANGE = 0.045;
 const ZOOM_OUT_RANGE = 0.14;
 
 type ViewState = { position: THREE.Vector3; target: THREE.Vector3 };
+type WorldBTextureSet = {
+  branchColor: THREE.Texture;
+  branchGloss: THREE.Texture;
+  branchTransmission: THREE.Texture;
+  sporeColor: THREE.Texture;
+  sporeGloss: THREE.Texture;
+  sporeTransmission: THREE.Texture;
+};
+type WorldBPhysicalMaterial = THREE.MeshStandardMaterial & {
+  transmission?: number;
+  transmissionMap?: THREE.Texture | null;
+  thickness?: number;
+  thicknessMap?: THREE.Texture | null;
+  sheen?: number;
+  sheenRoughness?: number;
+  specularIntensity?: number;
+  specularIntensityMap?: THREE.Texture | null;
+};
 type WorldDCoreCell = {
   group: THREE.Group;
   top: THREE.Mesh;
@@ -159,6 +182,7 @@ export function App() {
   const worldBReadyRef = useRef(false);
   const worldBLightsRef = useRef<THREE.Light[] | null>(null);
   const worldBMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const worldBMixerRef = useRef<THREE.AnimationMixer | null>(null);
   const worldBCenterRef = useRef<THREE.Vector3 | null>(null);
   const worldBInitialViewAppliedRef = useRef(false);
   const worldBEntryDistanceRef = useRef<number | null>(null);
@@ -239,9 +263,30 @@ export function App() {
   };
 
   const applyTextureOrientation = (texture: THREE.Texture, url: string) => {
-    if (url !== WORLD_B_IMAGE) return;
-    if (texture.flipY !== false) {
+    const shouldFlipY = url === WORLD_B_IMAGE
+      || url === WORLD_B_BRANCH_COLOR
+      || url === WORLD_B_BRANCH_GLOSS
+      || url === WORLD_B_BRANCH_TRANSMISSION
+      || url === WORLD_B_SPORE_COLOR
+      || url === WORLD_B_SPORE_GLOSS
+      || url === WORLD_B_SPORE_TRANSMISSION;
+
+    let updated = false;
+    if (shouldFlipY && texture.flipY !== false) {
       texture.flipY = false;
+      updated = true;
+    }
+
+    const shouldUseSrgb = url === WORLD_B_IMAGE
+      || url === WORLD_B_BRANCH_COLOR
+      || url === WORLD_B_SPORE_COLOR;
+
+    if (shouldUseSrgb && texture.colorSpace !== THREE.SRGBColorSpace) {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      updated = true;
+    }
+
+    if (updated) {
       texture.needsUpdate = true;
     }
   };
@@ -276,6 +321,74 @@ export function App() {
 
     textureLoadingRef.current[url] = promise;
     return promise;
+  }, []);
+
+  const loadWorldBTextures = useCallback(async (): Promise<WorldBTextureSet> => {
+    const [branchColor, branchGloss, branchTransmission, sporeColor, sporeGloss, sporeTransmission] = await Promise.all([
+      loadTexture(WORLD_B_BRANCH_COLOR),
+      loadTexture(WORLD_B_BRANCH_GLOSS),
+      loadTexture(WORLD_B_BRANCH_TRANSMISSION),
+      loadTexture(WORLD_B_SPORE_COLOR),
+      loadTexture(WORLD_B_SPORE_GLOSS),
+      loadTexture(WORLD_B_SPORE_TRANSMISSION),
+    ]);
+
+    return {
+      branchColor,
+      branchGloss,
+      branchTransmission,
+      sporeColor,
+      sporeGloss,
+      sporeTransmission,
+    };
+  }, [loadTexture]);
+
+  const applyWorldBMaterialTextures = useCallback((model: THREE.Object3D, textures: WorldBTextureSet) => {
+    let firstStandardMaterial: THREE.MeshStandardMaterial | null = null;
+
+    model.traverse((child) => {
+      if (!(child as THREE.Mesh).isMesh) return;
+
+      const mesh = child as THREE.Mesh;
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      materials.forEach((material) => {
+        if (!(material as THREE.MeshStandardMaterial).isMeshStandardMaterial) return;
+
+        const physicalMaterial = material as WorldBPhysicalMaterial;
+        const materialName = physicalMaterial.name ?? '';
+        const isSporeMaterial = materialName.includes('\u7403') || /spore/i.test(materialName);
+        const baseColorMap = isSporeMaterial ? textures.sporeColor : textures.branchColor;
+        const glossMap = isSporeMaterial ? textures.sporeGloss : textures.branchGloss;
+        const transmissionMap = isSporeMaterial ? textures.sporeTransmission : textures.branchTransmission;
+
+        physicalMaterial.color.set(0xffffff);
+        physicalMaterial.map = baseColorMap;
+        physicalMaterial.metalness = 0;
+        physicalMaterial.roughness = isSporeMaterial ? 0.34 : 0.58;
+        physicalMaterial.side = THREE.DoubleSide;
+        physicalMaterial.transparent = true;
+        physicalMaterial.opacity = 1;
+        physicalMaterial.depthWrite = true;
+        physicalMaterial.emissive.set(0x000000);
+        physicalMaterial.emissiveIntensity = Math.max(physicalMaterial.emissiveIntensity ?? 0, isSporeMaterial ? 0.06 : 0.03);
+
+        physicalMaterial.specularIntensity = isSporeMaterial ? 1.0 : 0.72;
+        physicalMaterial.specularIntensityMap = glossMap;
+        physicalMaterial.transmission = isSporeMaterial ? 0.82 : 0.68;
+        physicalMaterial.transmissionMap = transmissionMap;
+        physicalMaterial.thickness = isSporeMaterial ? 0.9 : 0.38;
+        physicalMaterial.thicknessMap = transmissionMap;
+        physicalMaterial.sheen = 1;
+        physicalMaterial.sheenRoughness = isSporeMaterial ? 0.35 : 0.48;
+        physicalMaterial.needsUpdate = true;
+
+        if (!firstStandardMaterial) {
+          firstStandardMaterial = physicalMaterial;
+        }
+      });
+    });
+
+    return firstStandardMaterial;
   }, []);
 
   const buildGeometryFromTexture = useCallback((texture: THREE.Texture) => {
@@ -572,17 +685,19 @@ export function App() {
   }, []);
 
   const fitWorldBModel = useCallback((model: THREE.Object3D) => {
+    model.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(model);
     const size = new THREE.Vector3();
     box.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    const target = 320;
-    const scale = target / maxDim;
+    const scale = WORLD_B_TARGET_SIZE / maxDim;
     model.scale.setScalar(scale);
+    model.updateMatrixWorld(true);
     box.setFromObject(model);
     const center = new THREE.Vector3();
     box.getCenter(center);
     model.position.sub(center);
+    model.updateMatrixWorld(true);
     worldBCenterRef.current = new THREE.Vector3(0, 0, 0);
   }, []);
 
@@ -617,41 +732,62 @@ export function App() {
       return Promise.reject(new Error("Scene not ready"));
     }
     ensureWorldBLights();
-    const loader = new OBJLoader();
+    const loader = new GLTFLoader();
     const promise = new Promise<THREE.Object3D>((resolve, reject) => {
       loader.load(
         WORLD_B_MODEL,
-        async (obj) => {
+        async (gltf) => {
           try {
-            const texture = await loadTexture(WORLD_B_TEXTURE);
-            texture.colorSpace = THREE.SRGBColorSpace;
-            const material = new THREE.MeshStandardMaterial({
-              color: 0xffffff,
-              map: texture,
-              roughness: 0.55,
-              metalness: 0.12,
-              emissive: new THREE.Color(0x8c5b1f),
-              emissiveIntensity: 0.45,
-            });
-            worldBMaterialRef.current = material;
-            obj.traverse((child) => {
+            const model = gltf.scene || gltf.scenes[0];
+            if (!model) {
+              throw new Error("World B GLB has no scene");
+            }
+
+            const worldBTextures = await loadWorldBTextures();
+            model.traverse((child) => {
               if ((child as THREE.Mesh).isMesh) {
                 const mesh = child as THREE.Mesh;
-                mesh.material = material;
                 mesh.castShadow = false;
                 mesh.receiveShadow = false;
               }
             });
-            fitWorldBModel(obj);
-            obj.visible = false;
-            sceneRef.current?.add(obj);
-            worldBModelRef.current = obj;
+
+            worldBMaterialRef.current = applyWorldBMaterialTextures(model, worldBTextures);
+
+            const previousModel = worldBModelRef.current;
+            if (worldBMixerRef.current) {
+              worldBMixerRef.current.stopAllAction();
+              if (previousModel) {
+                worldBMixerRef.current.uncacheRoot(previousModel);
+              }
+            }
+
+            fitWorldBModel(model);
+            model.visible = false;
+            sceneRef.current?.add(model);
+            worldBModelRef.current = model;
+
+            if (gltf.animations && gltf.animations.length > 0) {
+              const mixer = new THREE.AnimationMixer(model);
+              gltf.animations.forEach((clip) => {
+                const action = mixer.clipAction(clip);
+                action.reset();
+                action.setLoop(THREE.LoopRepeat, Infinity);
+                action.clampWhenFinished = false;
+                action.enabled = true;
+                action.play();
+              });
+              worldBMixerRef.current = mixer;
+            } else {
+              worldBMixerRef.current = null;
+            }
+
             worldBReadyRef.current = true;
             worldBLoadingRef.current = null;
             if (currentWorldRef.current === 'B' && !worldBInitialViewAppliedRef.current) {
-              applyWorldBInitialView(obj);
+              applyWorldBInitialView(model);
             }
-            resolve(obj);
+            resolve(model);
           } catch (err) {
             worldBLoadingRef.current = null;
             reject(err);
@@ -666,7 +802,7 @@ export function App() {
     });
     worldBLoadingRef.current = promise;
     return promise;
-  }, [ensureWorldBLights, fitWorldBModel, loadTexture, applyWorldBInitialView]);
+  }, [ensureWorldBLights, fitWorldBModel, applyWorldBInitialView, loadWorldBTextures, applyWorldBMaterialTextures]);
 
   const preloadWorldBModel = useCallback(() => {
     void loadWorldBModel().catch((err) => {
@@ -1775,6 +1911,13 @@ export function App() {
 
   const cleanupScene = () => {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    if (worldBMixerRef.current) {
+        worldBMixerRef.current.stopAllAction();
+        if (worldBModelRef.current) {
+            worldBMixerRef.current.uncacheRoot(worldBModelRef.current);
+        }
+        worldBMixerRef.current = null;
+    }
     if (rendererRef.current) {
         // Check if the renderer's DOM element is actually a child before removing
         if (mountRef.current && rendererRef.current.domElement.parentNode === mountRef.current) {
@@ -1861,6 +2004,14 @@ export function App() {
     worldBReturnDistanceRef.current = null;
     worldBReturnArmedRef.current = false;
     worldBEntryArmedRef.current = false;
+    worldBModelRef.current = null;
+    worldBLoadingRef.current = null;
+    worldBReadyRef.current = false;
+    worldBLightsRef.current = null;
+    worldBMaterialRef.current = null;
+    worldBMixerRef.current = null;
+    worldBCenterRef.current = null;
+    worldBInitialViewAppliedRef.current = false;
     worldCVisitedRef.current = false;
     worldCViewRef.current = null;
     worldCEntryArmedRef.current = false;
@@ -2037,6 +2188,9 @@ export function App() {
                 // Only auto-rotate if hands aren't controlling it to avoid fighting
                 // Also update damping
                 controls.update();
+                if (worldBMixerRef.current) {
+                    worldBMixerRef.current.update(frameDelta);
+                }
 
                 const lastHandTime = handFrameTimeRef.current;
                 const handDelta = lastHandTime === null ? 1 / 60 : Math.min(elapsedTime - lastHandTime, 0.05);
