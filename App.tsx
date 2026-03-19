@@ -21,14 +21,32 @@ const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Ca
 const DEFAULT_IMAGE = "/A.png";
 const WORLD_B_IMAGE = "/B.png";
 const WORLD_B_MODEL = encodeURI("/B_animation/\u5b62\u5b50\u751f\u957f\u52a8\u753b.glb");
+const WORLD_B_BACKGROUND_VIDEO = encodeURI("/B_animation/background.mp4");
 const WORLD_B_BRANCH_COLOR = encodeURI("/B_animation/\u679d\u5e72\u8272\u5f69.png");
-const WORLD_B_BRANCH_GLOSS = encodeURI("/B_animation/\u679d\u5e72\u5149\u6cfd.png");
+const WORLD_B_BRANCH_ROUGHNESS = encodeURI("/B_animation/\u679d\u5e72\u7cd9\u5ea6.png");
+const WORLD_B_BRANCH_NORMAL = encodeURI("/B_animation/\u679d\u5e72\u6cd5\u5411.png");
 const WORLD_B_BRANCH_TRANSMISSION = encodeURI("/B_animation/\u679d\u5e72\u900f\u5c04.png");
 const WORLD_B_SPORE_COLOR = encodeURI("/B_animation/\u5b62\u5b50\u8272\u5f69.png");
-const WORLD_B_SPORE_GLOSS = encodeURI("/B_animation/\u5b62\u5b50\u5149\u6cfd.png");
+const WORLD_B_SPORE_ROUGHNESS = encodeURI("/B_animation/\u5b62\u5b50\u7cd9\u5ea6.png");
+const WORLD_B_SPORE_NORMAL = encodeURI("/B_animation/\u5b62\u5b50\u6cd5\u5411.png");
 const WORLD_B_SPORE_TRANSMISSION = encodeURI("/B_animation/\u5b62\u5b50\u900f\u5c04.png");
-const WORLD_B_TARGET_SIZE = 320;
-const WORLD_B_BLOOM_BOOST = 0.05;
+const WORLD_B_TARGET_SIZE = 360;
+const WORLD_B_CAMERA_DISTANCE_FACTOR = 2.55;
+const WORLD_B_CAMERA_HEIGHT_FACTOR = 0.04;
+const WORLD_B_TARGET_HEIGHT_FACTOR = 0.1;
+const DEFAULT_WORLD_B_PREVIEW_PARAMS = {
+  branchTint: '#f5b8f9',
+  sporeTint: '#ebd90f',
+  ambientIntensity: 2.9,
+  hemiIntensity: 3.1,
+  keyIntensity: 8,
+  fillIntensity: 0,
+  rimIntensity: 4,
+  branchEmissiveIntensity: 0,
+  sporeEmissiveIntensity: 0.49,
+  branchRoughness: 1,
+  sporeRoughness: 1,
+};
 const WORLD_C_MODEL = "/C.glb";
 const MIN_ZOOM_DISTANCE = 70;
 const MAX_ZOOM_DISTANCE = 1000;
@@ -39,7 +57,7 @@ const RETURN_ARM_MARGIN = 20;
 const REENTER_ARM_MARGIN = 20;
 const REENTER_ARM_MARGIN_C = 20;
 const WORLD_B_MAX_DISTANCE_FACTOR = 1.1;
-const WORLD_B_MIN_DISTANCE = 180;
+const WORLD_B_MIN_DISTANCE = 220;
 const WORLD_C_MAX_DISTANCE_FACTOR = 1.1;
 const REENTER_ARM_MARGIN_D = 20;
 const WORLD_D_MAX_DISTANCE_FACTOR = 1.05;
@@ -54,6 +72,10 @@ const WORLD_D_SPLIT_ANIM_MS = 1200;
 const WORLD_D_SPLIT_SCALE_FACTOR = 0.74;
 const WORLD_D_SPLIT_BASE_OFFSET = 120;
 const WORLD_D_MAX_SPLIT_CELLS = 64;
+const WORLD_D_SPLIT_START_OFFSET_FACTOR = 0.08;
+const WORLD_D_SPLIT_START_SCALE_FACTOR = 0.88;
+const WORLD_D_DAUGHTER_REST_SEAM_FACTOR = 0.02;
+const WORLD_D_DYNAMIC_CLEAVAGE_SEAM_FACTOR = 0.18;
 const OK_HOLD_MS = 3000;
 const WORLD_SWITCH_COOLDOWN_MS = 350;
 
@@ -71,10 +93,12 @@ const ZOOM_OUT_RANGE = 0.14;
 type ViewState = { position: THREE.Vector3; target: THREE.Vector3 };
 type WorldBTextureSet = {
   branchColor: THREE.Texture;
-  branchGloss: THREE.Texture;
+  branchRoughness: THREE.Texture;
+  branchNormal: THREE.Texture;
   branchTransmission: THREE.Texture;
   sporeColor: THREE.Texture;
-  sporeGloss: THREE.Texture;
+  sporeRoughness: THREE.Texture;
+  sporeNormal: THREE.Texture;
   sporeTransmission: THREE.Texture;
 };
 type WorldBPhysicalMaterial = THREE.MeshStandardMaterial & {
@@ -87,6 +111,14 @@ type WorldBPhysicalMaterial = THREE.MeshStandardMaterial & {
   specularIntensity?: number;
   specularIntensityMap?: THREE.Texture | null;
 };
+type WorldBLightRig = {
+  ambient: THREE.AmbientLight;
+  hemi: THREE.HemisphereLight;
+  key: THREE.DirectionalLight;
+  fill: THREE.DirectionalLight;
+  rim: THREE.DirectionalLight;
+};
+type WorldBPreviewParams = typeof DEFAULT_WORLD_B_PREVIEW_PARAMS;
 type WorldDCoreCell = {
   group: THREE.Group;
   top: THREE.Mesh;
@@ -94,10 +126,20 @@ type WorldDCoreCell = {
   baseOffset: THREE.Vector3;
   targetOffset: THREE.Vector3;
   baseScale: number;
+  splitStartScale: number;
+  splitStartSeam: number;
+  splitEndSeam: number;
 };
 
 export function App() {
   const mountRef = useRef<HTMLDivElement>(null);
+  const worldBVideoRef = useRef<HTMLVideoElement | null>(null);
+  const worldBVideoTextureRef = useRef<THREE.VideoTexture | null>(null);
+  const worldBBackgroundMeshRef = useRef<THREE.Mesh | null>(null);
+  const worldBVideoResumeCooldownRef = useRef(0);
+  const worldBVideoLastTimeRef = useRef(0);
+  const worldBVideoStallSinceRef = useRef<number | null>(null);
+  const worldBVideoListenersBoundRef = useRef(false);
   const [imageSrc, setImageSrc] = useState<string | null>(DEFAULT_IMAGE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,6 +176,8 @@ export function App() {
   const okHoldStartDRef = useRef<number | null>(null);
   const okHoldProgressDRef = useRef(0);
   const worldDLastWristAngleRef = useRef<number | null>(null);
+  const worldBLastWristAngleRef = useRef<number | null>(null);
+  const worldBRotationVelocityRef = useRef(0);
   const worldDRotationAccumRef = useRef(0);
   const worldDRotationProgressRef = useRef(0);
   const worldDStressHoldStartRef = useRef<number | null>(null);
@@ -145,7 +189,8 @@ export function App() {
   const worldDFistStrengthRef = useRef(0);
   const worldAImageRef = useRef<string | null>(DEFAULT_IMAGE);
   const worldBImageRef = useRef<string | null>(WORLD_B_IMAGE);
-
+  const [worldBPreviewParams, setWorldBPreviewParams] = useState<WorldBPreviewParams>(() => ({ ...DEFAULT_WORLD_B_PREVIEW_PARAMS }));
+  const worldBPreviewParamsRef = useRef<WorldBPreviewParams>({ ...DEFAULT_WORLD_B_PREVIEW_PARAMS });
   // Hand Gesture State
   const [handControlEnabled, setHandControlEnabled] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -181,7 +226,9 @@ export function App() {
   const worldBLoadingRef = useRef<Promise<THREE.Object3D> | null>(null);
   const worldBReadyRef = useRef(false);
   const worldBLightsRef = useRef<THREE.Light[] | null>(null);
+  const worldBLightRigRef = useRef<WorldBLightRig | null>(null);
   const worldBMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const worldBMaterialsRef = useRef<WorldBPhysicalMaterial[]>([]);
   const worldBMixerRef = useRef<THREE.AnimationMixer | null>(null);
   const worldBCenterRef = useRef<THREE.Vector3 | null>(null);
   const worldBInitialViewAppliedRef = useRef(false);
@@ -253,6 +300,47 @@ export function App() {
     growthSpeed: 0.005,
   });
 
+  const applyWorldBPreviewParams = useCallback(() => {
+    const preview = worldBPreviewParamsRef.current;
+    const lightRig = worldBLightRigRef.current;
+    if (lightRig) {
+      lightRig.ambient.intensity = preview.ambientIntensity;
+      lightRig.hemi.intensity = preview.hemiIntensity;
+      lightRig.key.intensity = preview.keyIntensity;
+      lightRig.fill.intensity = preview.fillIntensity;
+      lightRig.rim.intensity = preview.rimIntensity;
+    }
+
+    if (worldBMaterialsRef.current.length) {
+      worldBMaterialsRef.current.forEach((material) => {
+        const isSporeMaterial = material.userData.worldBRole === 'spore';
+        const tintHex = isSporeMaterial ? preview.sporeTint : preview.branchTint;
+        const tintColor = new THREE.Color(tintHex);
+        material.color.copy(tintColor);
+        material.roughness = isSporeMaterial ? preview.sporeRoughness : preview.branchRoughness;
+        material.emissive.copy(tintColor.clone().multiplyScalar(isSporeMaterial ? 0.5 : 0.22));
+        material.emissiveIntensity = isSporeMaterial ? preview.sporeEmissiveIntensity : preview.branchEmissiveIntensity;
+        material.needsUpdate = true;
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    worldBPreviewParamsRef.current = worldBPreviewParams;
+    applyWorldBPreviewParams();
+  }, [worldBPreviewParams, applyWorldBPreviewParams]);
+
+  const updateWorldBPreviewParam = useCallback((key: keyof WorldBPreviewParams, value: string | number) => {
+    setWorldBPreviewParams((prev) => ({
+      ...prev,
+      [key]: value,
+    } as WorldBPreviewParams));
+  }, []);
+
+  const resetWorldBPreviewParams = useCallback(() => {
+    setWorldBPreviewParams({ ...DEFAULT_WORLD_B_PREVIEW_PARAMS });
+  }, []);
+
   const getTextureLoader = () => {
     if (!textureLoaderRef.current) {
       const loader = new THREE.TextureLoader();
@@ -265,10 +353,12 @@ export function App() {
   const applyTextureOrientation = (texture: THREE.Texture, url: string) => {
     const shouldFlipY = url === WORLD_B_IMAGE
       || url === WORLD_B_BRANCH_COLOR
-      || url === WORLD_B_BRANCH_GLOSS
+      || url === WORLD_B_BRANCH_ROUGHNESS
+      || url === WORLD_B_BRANCH_NORMAL
       || url === WORLD_B_BRANCH_TRANSMISSION
       || url === WORLD_B_SPORE_COLOR
-      || url === WORLD_B_SPORE_GLOSS
+      || url === WORLD_B_SPORE_ROUGHNESS
+      || url === WORLD_B_SPORE_NORMAL
       || url === WORLD_B_SPORE_TRANSMISSION;
 
     let updated = false;
@@ -324,27 +414,33 @@ export function App() {
   }, []);
 
   const loadWorldBTextures = useCallback(async (): Promise<WorldBTextureSet> => {
-    const [branchColor, branchGloss, branchTransmission, sporeColor, sporeGloss, sporeTransmission] = await Promise.all([
+    const [branchColor, branchRoughness, branchNormal, branchTransmission, sporeColor, sporeRoughness, sporeNormal, sporeTransmission] = await Promise.all([
       loadTexture(WORLD_B_BRANCH_COLOR),
-      loadTexture(WORLD_B_BRANCH_GLOSS),
+      loadTexture(WORLD_B_BRANCH_ROUGHNESS),
+      loadTexture(WORLD_B_BRANCH_NORMAL),
       loadTexture(WORLD_B_BRANCH_TRANSMISSION),
       loadTexture(WORLD_B_SPORE_COLOR),
-      loadTexture(WORLD_B_SPORE_GLOSS),
+      loadTexture(WORLD_B_SPORE_ROUGHNESS),
+      loadTexture(WORLD_B_SPORE_NORMAL),
       loadTexture(WORLD_B_SPORE_TRANSMISSION),
     ]);
 
     return {
       branchColor,
-      branchGloss,
+      branchRoughness,
+      branchNormal,
       branchTransmission,
       sporeColor,
-      sporeGloss,
+      sporeRoughness,
+      sporeNormal,
       sporeTransmission,
     };
   }, [loadTexture]);
 
   const applyWorldBMaterialTextures = useCallback((model: THREE.Object3D, textures: WorldBTextureSet) => {
     let firstStandardMaterial: THREE.MeshStandardMaterial | null = null;
+    const seenMaterials = new Set<THREE.Material>();
+    worldBMaterialsRef.current = [];
 
     model.traverse((child) => {
       if (!(child as THREE.Mesh).isMesh) return;
@@ -355,32 +451,45 @@ export function App() {
         if (!(material as THREE.MeshStandardMaterial).isMeshStandardMaterial) return;
 
         const physicalMaterial = material as WorldBPhysicalMaterial;
-        const materialName = physicalMaterial.name ?? '';
-        const isSporeMaterial = materialName.includes('\u7403') || /spore/i.test(materialName);
-        const baseColorMap = isSporeMaterial ? textures.sporeColor : textures.branchColor;
-        const glossMap = isSporeMaterial ? textures.sporeGloss : textures.branchGloss;
-        const transmissionMap = isSporeMaterial ? textures.sporeTransmission : textures.branchTransmission;
+        if (seenMaterials.has(physicalMaterial)) return;
+        seenMaterials.add(physicalMaterial);
 
-        physicalMaterial.color.set(0xffffff);
+        const materialName = physicalMaterial.name ?? '';
+        const isSporeMaterial = materialName.includes('\u5c0f\u7403') || /spore|sphere|ball/i.test(materialName);
+        const baseColorMap = isSporeMaterial ? textures.sporeColor : textures.branchColor;
+        const roughnessMap = isSporeMaterial ? textures.sporeRoughness : textures.branchRoughness;
+        const normalMap = isSporeMaterial ? textures.sporeNormal : textures.branchNormal;
+        const transmissionMap = isSporeMaterial ? textures.sporeTransmission : textures.branchTransmission;
+        const tintHex = isSporeMaterial ? DEFAULT_WORLD_B_PREVIEW_PARAMS.sporeTint : DEFAULT_WORLD_B_PREVIEW_PARAMS.branchTint;
+        const tintColor = new THREE.Color(tintHex);
+
+        physicalMaterial.userData.worldBRole = isSporeMaterial ? 'spore' : 'branch';
+        physicalMaterial.color.copy(tintColor);
         physicalMaterial.map = baseColorMap;
         physicalMaterial.metalness = 0;
-        physicalMaterial.roughness = isSporeMaterial ? 0.34 : 0.58;
+        physicalMaterial.roughness = isSporeMaterial ? DEFAULT_WORLD_B_PREVIEW_PARAMS.sporeRoughness : DEFAULT_WORLD_B_PREVIEW_PARAMS.branchRoughness;
+        physicalMaterial.roughnessMap = roughnessMap;
         physicalMaterial.side = THREE.DoubleSide;
-        physicalMaterial.transparent = true;
+        physicalMaterial.transparent = false;
         physicalMaterial.opacity = 1;
         physicalMaterial.depthWrite = true;
-        physicalMaterial.emissive.set(0x000000);
-        physicalMaterial.emissiveIntensity = Math.max(physicalMaterial.emissiveIntensity ?? 0, isSporeMaterial ? 0.06 : 0.03);
-
-        physicalMaterial.specularIntensity = isSporeMaterial ? 1.0 : 0.72;
-        physicalMaterial.specularIntensityMap = glossMap;
-        physicalMaterial.transmission = isSporeMaterial ? 0.82 : 0.68;
-        physicalMaterial.transmissionMap = transmissionMap;
-        physicalMaterial.thickness = isSporeMaterial ? 0.9 : 0.38;
-        physicalMaterial.thicknessMap = transmissionMap;
-        physicalMaterial.sheen = 1;
-        physicalMaterial.sheenRoughness = isSporeMaterial ? 0.35 : 0.48;
+        physicalMaterial.emissive.copy(tintColor.clone().multiplyScalar(isSporeMaterial ? 0.5 : 0.22));
+        physicalMaterial.emissiveIntensity = isSporeMaterial ? DEFAULT_WORLD_B_PREVIEW_PARAMS.sporeEmissiveIntensity : DEFAULT_WORLD_B_PREVIEW_PARAMS.branchEmissiveIntensity;
+        physicalMaterial.specularIntensity = 0;
+        physicalMaterial.specularIntensityMap = null;
+        physicalMaterial.transmission = 0;
+        physicalMaterial.transmissionMap = null;
+        physicalMaterial.thickness = 0;
+        physicalMaterial.thicknessMap = null;
+        physicalMaterial.sheen = 0;
+        physicalMaterial.sheenRoughness = 1;
+        physicalMaterial.bumpMap = transmissionMap;
+        physicalMaterial.bumpScale = isSporeMaterial ? 0.035 : 0.02;
+        physicalMaterial.normalMap = normalMap;
+        physicalMaterial.normalScale = new THREE.Vector2(isSporeMaterial ? 0.38 : 0.22, isSporeMaterial ? 0.38 : 0.22);
+        physicalMaterial.envMapIntensity = 0.45;
         physicalMaterial.needsUpdate = true;
+        worldBMaterialsRef.current.push(physicalMaterial);
 
         if (!firstStandardMaterial) {
           firstStandardMaterial = physicalMaterial;
@@ -388,8 +497,9 @@ export function App() {
       });
     });
 
+    applyWorldBPreviewParams();
     return firstStandardMaterial;
-  }, []);
+  }, [applyWorldBPreviewParams]);
 
   const buildGeometryFromTexture = useCallback((texture: THREE.Texture) => {
     const img = texture.image as { width?: number; height?: number };
@@ -670,21 +780,28 @@ export function App() {
   const ensureWorldBLights = useCallback(() => {
     if (!sceneRef.current) return;
     if (worldBLightsRef.current) return;
-    const ambient = new THREE.AmbientLight(0xffffff, 1.05);
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x2b1e0f, 0.85);
-    const key = new THREE.DirectionalLight(0xffffff, 2.2);
-    key.position.set(8, 12, 10);
-    const fill = new THREE.DirectionalLight(0xfff0d0, 1.4);
-    fill.position.set(-8, 4, 6);
+    const ambient = new THREE.AmbientLight(0xfff7f0, DEFAULT_WORLD_B_PREVIEW_PARAMS.ambientIntensity);
+    const hemi = new THREE.HemisphereLight(0xffe7d8, 0x140d0b, DEFAULT_WORLD_B_PREVIEW_PARAMS.hemiIntensity);
+    const key = new THREE.DirectionalLight(0xffead7, DEFAULT_WORLD_B_PREVIEW_PARAMS.keyIntensity);
+    key.position.set(8, 10, 14);
+    const fill = new THREE.DirectionalLight(0xffdcc8, DEFAULT_WORLD_B_PREVIEW_PARAMS.fillIntensity);
+    fill.position.set(-10, 6, 10);
+    const rim = new THREE.DirectionalLight(0xffc78b, DEFAULT_WORLD_B_PREVIEW_PARAMS.rimIntensity);
+    rim.position.set(0, 4, -12);
     ambient.visible = false;
     hemi.visible = false;
     key.visible = false;
     fill.visible = false;
-    sceneRef.current.add(ambient, hemi, key, fill);
-    worldBLightsRef.current = [ambient, hemi, key, fill];
-  }, []);
+    rim.visible = false;
+    sceneRef.current.add(ambient, hemi, key, fill, rim);
+    worldBLightsRef.current = [ambient, hemi, key, fill, rim];
+    worldBLightRigRef.current = { ambient, hemi, key, fill, rim };
+    applyWorldBPreviewParams();
+  }, [applyWorldBPreviewParams]);
 
   const fitWorldBModel = useCallback((model: THREE.Object3D) => {
+    model.position.set(0, 0, 0);
+    model.rotation.set(0, 0, 0);
     model.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(model);
     const size = new THREE.Vector3();
@@ -695,10 +812,12 @@ export function App() {
     model.updateMatrixWorld(true);
     box.setFromObject(model);
     const center = new THREE.Vector3();
+    const scaledSize = new THREE.Vector3();
     box.getCenter(center);
+    box.getSize(scaledSize);
     model.position.sub(center);
     model.updateMatrixWorld(true);
-    worldBCenterRef.current = new THREE.Vector3(0, 0, 0);
+    worldBCenterRef.current = new THREE.Vector3(0, scaledSize.y * WORLD_B_TARGET_HEIGHT_FACTOR, 0);
   }, []);
 
   const applyWorldBInitialView = useCallback((model: THREE.Object3D) => {
@@ -708,11 +827,19 @@ export function App() {
     const center = new THREE.Vector3();
     box.getSize(size);
     box.getCenter(center);
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const focus = worldBCenterRef.current?.clone() ?? center.clone();
     const maxDistance = getWorldMaxZoomDistance('B');
-    const distance = Math.max(maxDistance, maxDim * 2.4);
-    cameraRef.current.position.set(center.x, center.y, center.z + distance);
-    controlsRef.current.target.copy(center);
+    const distance = THREE.MathUtils.clamp(
+      Math.max(size.x, size.y, size.z) * WORLD_B_CAMERA_DISTANCE_FACTOR,
+      WORLD_B_MIN_DISTANCE + 180,
+      maxDistance * 0.82,
+    );
+    cameraRef.current.position.set(
+      focus.x,
+      focus.y + size.y * WORLD_B_CAMERA_HEIGHT_FACTOR,
+      focus.z + distance,
+    );
+    controlsRef.current.target.copy(focus);
     controlsRef.current.update();
     worldBViewRef.current = {
       position: cameraRef.current.position.clone(),
@@ -720,6 +847,112 @@ export function App() {
     };
     worldBInitialViewAppliedRef.current = true;
   }, []);
+
+  const syncWorldBBackgroundPlane = useCallback(() => {
+    // World B uses a DOM video layer behind the transparent renderer.
+  }, []);
+
+  const playWorldBBackgroundVideo = useCallback(() => {
+    const video = worldBVideoRef.current;
+    if (!video) return;
+
+    const tryPlay = () => {
+      if (Number.isFinite(video.duration) && video.currentTime >= Math.max(video.duration - 0.05, 0)) {
+        try {
+          video.currentTime = 0;
+        } catch {
+          // Ignore seek failures while the browser is still priming the media.
+        }
+      }
+      const playPromise = video.play();
+      if (playPromise) {
+        void playPromise.catch((err) => {
+          console.warn('World B background video autoplay failed', err);
+        });
+      }
+    };
+
+    video.loop = true;
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.playbackRate = 1;
+
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      tryPlay();
+      return;
+    }
+
+    const handleCanPlay = () => {
+      if (currentWorldRef.current === 'B') {
+        tryPlay();
+      }
+    };
+    video.addEventListener('canplay', handleCanPlay, { once: true });
+    if (video.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+      video.load();
+    }
+  }, []);
+
+  const pauseWorldBBackgroundVideo = useCallback((reset = false) => {
+    const video = worldBVideoRef.current;
+    if (!video) return;
+    if (!reset) return;
+    worldBVideoResumeCooldownRef.current = 0;
+    video.pause();
+    if (reset) {
+      try {
+        video.currentTime = 0;
+      } catch {
+        // Ignore browsers that block seeks on not-yet-loaded media.
+      }
+    }
+  }, []);
+
+  const ensureWorldBBackground = useCallback(() => {
+    const video = worldBVideoRef.current;
+    if (!video) return;
+
+    if (!video.src) {
+      video.src = WORLD_B_BACKGROUND_VIDEO;
+    }
+    video.loop = true;
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.preload = 'auto';
+    video.crossOrigin = 'anonymous';
+    video.playbackRate = 1;
+    video.setAttribute('muted', '');
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.setAttribute('autoplay', '');
+
+    if (!worldBVideoListenersBoundRef.current) {
+      const requestResume = () => {
+        if (currentWorldRef.current === 'B') {
+          worldBVideoResumeCooldownRef.current = 0;
+          playWorldBBackgroundVideo();
+        }
+      };
+      video.addEventListener('ended', requestResume);
+      video.addEventListener('stalled', requestResume);
+      video.addEventListener('waiting', requestResume);
+      video.addEventListener('suspend', requestResume);
+      video.addEventListener('error', requestResume);
+      worldBVideoListenersBoundRef.current = true;
+    }
+
+    if (video.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+      video.load();
+    }
+
+    if (currentWorldRef.current === 'B') {
+      playWorldBBackgroundVideo();
+    }
+  }, [playWorldBBackgroundVideo]);
 
   const loadWorldBModel = useCallback(() => {
     if (worldBReadyRef.current && worldBModelRef.current) {
@@ -775,8 +1008,11 @@ export function App() {
                 action.setLoop(THREE.LoopRepeat, Infinity);
                 action.clampWhenFinished = false;
                 action.enabled = true;
+                action.setEffectiveTimeScale(1);
+                action.setEffectiveWeight(1);
                 action.play();
               });
+              mixer.timeScale = 1;
               worldBMixerRef.current = mixer;
             } else {
               worldBMixerRef.current = null;
@@ -817,6 +1053,20 @@ export function App() {
   }, [loadWorldCModel]);
 
   const setWorldVisibility = (world: 'A' | 'B' | 'C' | 'D') => {
+    ensureWorldBBackground();
+    if (world === 'B') {
+      playWorldBBackgroundVideo();
+    }
+    if (sceneRef.current) {
+      sceneRef.current.background = world === 'B' ? null : new THREE.Color(0x050505);
+    }
+    if (rendererRef.current) {
+      rendererRef.current.setClearColor(0x000000, world === 'B' ? 0 : 1);
+      rendererRef.current.domElement.style.backgroundColor = world === 'B' ? 'transparent' : '#050505';
+    }
+    if (worldBBackgroundMeshRef.current) {
+      worldBBackgroundMeshRef.current.visible = false;
+    }
     if (pointsRef.current) {
       pointsRef.current.visible = world === 'A';
     }
@@ -826,6 +1076,7 @@ export function App() {
     if (worldBModelRef.current) {
       worldBModelRef.current.visible = world === 'B';
     }
+
     if (worldCModelRef.current) {
       worldCModelRef.current.visible = false;
     }
@@ -938,22 +1189,34 @@ export function App() {
     worldDParticleDataRef.current = { positions, velocities, basePositions };
   }, []);
 
-  const buildWorldDCoreCell = useCallback((position: THREE.Vector3, scale: number): WorldDCoreCell | null => {
+  const buildWorldDCoreCell = useCallback((
+    position: THREE.Vector3,
+    scale: number,
+    options?: {
+      startScale?: number;
+      startSeam?: number;
+      endSeam?: number;
+    }
+  ): WorldDCoreCell | null => {
     const geometry = worldDCellGeometryRef.current;
     const material = worldDMaterialRef.current;
     if (!geometry || !material) return null;
 
-    const seam = worldDCellRadiusRef.current * worldDCellSeamOffsetRef.current;
+    const defaultSeam = worldDCellRadiusRef.current * worldDCellSeamOffsetRef.current;
+    const startScale = options?.startScale ?? scale;
+    const startSeam = options?.startSeam ?? defaultSeam;
+    const endSeam = options?.endSeam ?? startSeam;
+
     const cellGroup = new THREE.Group();
     const top = new THREE.Mesh(geometry, material);
     const bottom = new THREE.Mesh(geometry, material);
-    top.position.y = seam;
-    bottom.position.y = -seam;
-    top.userData.baseY = top.position.y;
-    bottom.userData.baseY = bottom.position.y;
+    top.position.y = startSeam;
+    bottom.position.y = -startSeam;
+    top.userData.baseY = endSeam;
+    bottom.userData.baseY = -endSeam;
     cellGroup.add(top, bottom);
     cellGroup.position.copy(position);
-    cellGroup.scale.setScalar(scale);
+    cellGroup.scale.setScalar(startScale);
 
     return {
       group: cellGroup,
@@ -962,6 +1225,9 @@ export function App() {
       baseOffset: position.clone(),
       targetOffset: position.clone(),
       baseScale: scale,
+      splitStartScale: startScale,
+      splitStartSeam: startSeam,
+      splitEndSeam: endSeam,
     };
   }, []);
 
@@ -992,11 +1258,25 @@ export function App() {
         Math.sin(angle * 1.3) * 0.22,
         Math.sin(angle)
       ).normalize();
-      const offset = axis.multiplyScalar(spacing);
+      const offset = axis.clone().multiplyScalar(spacing);
+      const startOffset = offset.clone().multiplyScalar(WORLD_D_SPLIT_START_OFFSET_FACTOR);
       const nextScale = cell.baseScale * WORLD_D_SPLIT_SCALE_FACTOR;
+      const startScale = nextScale * WORLD_D_SPLIT_START_SCALE_FACTOR;
+      const restSeam = Math.abs((cell.top.userData.baseY as number) ?? (worldDCellRadiusRef.current * worldDCellSeamOffsetRef.current));
+      const cleavageSeam = Math.max(restSeam, worldDCellRadiusRef.current * WORLD_D_DYNAMIC_CLEAVAGE_SEAM_FACTOR);
+      const daughterEndSeam = worldDCellRadiusRef.current * WORLD_D_DAUGHTER_REST_SEAM_FACTOR;
+      const daughterStartSeam = Math.max(cleavageSeam * 1.04, daughterEndSeam + 1);
 
-      const childA = buildWorldDCoreCell(base, nextScale);
-      const childB = buildWorldDCoreCell(base, nextScale);
+      const childA = buildWorldDCoreCell(base.clone().add(startOffset), nextScale, {
+        startScale,
+        startSeam: daughterStartSeam,
+        endSeam: daughterEndSeam,
+      });
+      const childB = buildWorldDCoreCell(base.clone().sub(startOffset), nextScale, {
+        startScale,
+        startSeam: daughterStartSeam,
+        endSeam: daughterEndSeam,
+      });
       if (!childA || !childB) return;
 
       childA.targetOffset.copy(base).add(offset);
@@ -1353,6 +1633,10 @@ export function App() {
         worldDFistStrengthRef.current = 0;
         worldDLastWristAngleRef.current = null;
     }
+    if (previousWorld === 'B' && nextWorld !== 'B') {
+        worldBLastWristAngleRef.current = null;
+        worldBRotationVelocityRef.current = 0;
+    }
     if (nextWorld === 'A') {
         const nextImage = worldAImageRef.current;
         if (nextImage) {
@@ -1369,6 +1653,8 @@ export function App() {
     } else if (nextWorld === 'B') {
 
         const fromWorldC = previousWorld === 'C';
+        worldBLastWristAngleRef.current = null;
+        worldBRotationVelocityRef.current = 0;
         if (!worldBVisitedRef.current) {
             worldBVisitedRef.current = true;
         }
@@ -1747,6 +2033,33 @@ export function App() {
         updateOkHoldC(okDetected);
         updateOkHoldD(okDetected);
 
+        if (currentWorldRef.current === 'B') {
+            if (leftHand && worldBModelRef.current && !okDetected) {
+                const wristAngle = getWristRotationAngle(leftHand);
+                if (wristAngle !== null) {
+                    if (worldBLastWristAngleRef.current !== null) {
+                        const delta = Math.atan2(
+                            Math.sin(wristAngle - worldBLastWristAngleRef.current),
+                            Math.cos(wristAngle - worldBLastWristAngleRef.current)
+                        );
+                        const filteredDelta = THREE.MathUtils.clamp(delta * 1.7, -0.24, 0.24);
+                        worldBRotationVelocityRef.current = THREE.MathUtils.lerp(
+                            worldBRotationVelocityRef.current,
+                            filteredDelta,
+                            0.58
+                        );
+                    }
+                    worldBLastWristAngleRef.current = wristAngle;
+                } else {
+                    worldBLastWristAngleRef.current = null;
+                }
+            } else {
+                worldBLastWristAngleRef.current = null;
+            }
+        } else {
+            worldBLastWristAngleRef.current = null;
+        }
+
         if (currentWorldRef.current === 'C') {
             if (leftHand) {
                 const zoomReady = worldDZoomCompletedRef.current;
@@ -1895,6 +2208,8 @@ export function App() {
       previousHandPos.current = null;
       smoothedHandPos.current = null;
       handFrameTimeRef.current = null;
+      worldBLastWristAngleRef.current = null;
+      worldBRotationVelocityRef.current = 0;
       if (cameraInstance) {
           cameraInstance.stop();
           cameraInstance = null;
@@ -1911,6 +2226,26 @@ export function App() {
 
   const cleanupScene = () => {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    worldBLightRigRef.current = null;
+    worldBMaterialsRef.current = [];
+    if (worldBBackgroundMeshRef.current) {
+        if (worldBBackgroundMeshRef.current.parent) {
+            worldBBackgroundMeshRef.current.parent.remove(worldBBackgroundMeshRef.current);
+        }
+        worldBBackgroundMeshRef.current.geometry.dispose();
+        (worldBBackgroundMeshRef.current.material as THREE.Material).dispose();
+        worldBBackgroundMeshRef.current = null;
+    }
+    if (worldBVideoTextureRef.current) {
+        worldBVideoTextureRef.current.dispose();
+        worldBVideoTextureRef.current = null;
+    }
+    if (worldBVideoRef.current) {
+        pauseWorldBBackgroundVideo(true);
+    }
+    worldBVideoResumeCooldownRef.current = 0;
+    worldBVideoLastTimeRef.current = 0;
+    worldBVideoStallSinceRef.current = null;
     if (worldBMixerRef.current) {
         worldBMixerRef.current.stopAllAction();
         if (worldBModelRef.current) {
@@ -1966,15 +2301,17 @@ export function App() {
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(60, width / height, 1, 5000);
+    scene.add(camera);
     camera.position.set(0, -200, 350);
     const initialDistance = camera.position.length();
     const planeNormal = new THREE.Vector3(0, 0, 1).applyEuler(new THREE.Euler(-Math.PI / 1.6, 0, 0));
     camera.position.copy(planeNormal.multiplyScalar(-initialDistance));
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: false });
+    const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000, 1);
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
@@ -2008,7 +2345,9 @@ export function App() {
     worldBLoadingRef.current = null;
     worldBReadyRef.current = false;
     worldBLightsRef.current = null;
+    worldBLightRigRef.current = null;
     worldBMaterialRef.current = null;
+    worldBMaterialsRef.current = [];
     worldBMixerRef.current = null;
     worldBCenterRef.current = null;
     worldBInitialViewAppliedRef.current = false;
@@ -2067,6 +2406,8 @@ export function App() {
     worldDZoomStartDistanceRef.current = null;
     setWorldDZoomProgress(0);
     worldDLastWristAngleRef.current = null;
+    worldBLastWristAngleRef.current = null;
+    worldBRotationVelocityRef.current = 0;
     worldBUnlockedRef.current = false;
     setWorldBUnlocked(false);
     worldCUnlockedRef.current = false;
@@ -2190,6 +2531,23 @@ export function App() {
                 controls.update();
                 if (worldBMixerRef.current) {
                     worldBMixerRef.current.update(frameDelta);
+                }
+                if (currentWorldRef.current === 'B' && worldBModelRef.current) {
+                    const worldBRotationStep = worldBRotationVelocityRef.current * 1.18 * Math.min(frameDelta * 60, 1.6);
+                    if (Math.abs(worldBRotationStep) > 0.0001) {
+                        worldBModelRef.current.rotation.y += worldBRotationStep;
+                    }
+                    const worldBVideo = worldBVideoRef.current;
+                    if (worldBVideo && currentWorldRef.current === 'B') {
+                        const now = performance.now();
+                        if (!document.hidden && (worldBVideo.paused || worldBVideo.ended) && now >= worldBVideoResumeCooldownRef.current) {
+                            worldBVideoResumeCooldownRef.current = now + 1200;
+                            playWorldBBackgroundVideo();
+                        }
+                    }
+                    worldBRotationVelocityRef.current = THREE.MathUtils.lerp(worldBRotationVelocityRef.current, 0, 0.1);
+                } else {
+                    worldBRotationVelocityRef.current = THREE.MathUtils.lerp(worldBRotationVelocityRef.current, 0, 0.22);
                 }
 
                 const lastHandTime = handFrameTimeRef.current;
@@ -2373,11 +2731,22 @@ if (currentWorldRef.current === 'C') {
                                     if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null) {
                                         const splitElapsed = performance.now() - worldDSplitStartRef.current;
                                         const splitProgress = THREE.MathUtils.clamp(splitElapsed / WORLD_D_SPLIT_ANIM_MS, 0, 1);
-                                        const eased = 1 - Math.pow(1 - splitProgress, 3);
+                                        const separationProgress = THREE.MathUtils.smoothstep(splitProgress, 0.12, 1);
+                                        const roundingProgress = THREE.MathUtils.smoothstep(splitProgress, 0.18, 1);
+                                        const cleavageProgress = THREE.MathUtils.smoothstep(splitProgress, 0, 0.45);
                                         worldDCoreCellsRef.current.forEach((cell, idx) => {
-                                            cell.group.position.lerpVectors(cell.baseOffset, cell.targetOffset, eased);
-                                            const wobble = 1 + (1 - splitProgress) * 0.04 * Math.sin(elapsedTime * 9 + idx * 0.9);
-                                            cell.group.scale.setScalar(cell.baseScale * wobble);
+                                            cell.group.position.lerpVectors(cell.baseOffset, cell.targetOffset, separationProgress);
+                                            const wobble = 1 + (1 - splitProgress) * 0.025 * Math.sin(elapsedTime * 8 + idx * 0.9);
+                                            const liveScale = THREE.MathUtils.lerp(cell.splitStartScale, cell.baseScale, roundingProgress);
+                                            cell.group.scale.setScalar(liveScale * wobble);
+
+                                            const seam = THREE.MathUtils.lerp(cell.splitStartSeam, cell.splitEndSeam, roundingProgress);
+                                            const stretchXZ = THREE.MathUtils.lerp(1.12, 1, cleavageProgress);
+                                            const stretchY = THREE.MathUtils.lerp(0.78, 1, roundingProgress);
+                                            cell.top.position.y = seam;
+                                            cell.bottom.position.y = -seam;
+                                            cell.top.scale.set(stretchXZ, stretchY, stretchXZ);
+                                            cell.bottom.scale.set(stretchXZ, stretchY, stretchXZ);
                                         });
                                         if (splitProgress >= 1) {
                                             worldDSplitAnimatingRef.current = false;
@@ -2386,6 +2755,12 @@ if (currentWorldRef.current === 'C') {
                                                 cell.baseOffset.copy(cell.targetOffset);
                                                 cell.group.position.copy(cell.targetOffset);
                                                 cell.group.scale.setScalar(cell.baseScale);
+                                                cell.top.position.y = cell.splitEndSeam;
+                                                cell.bottom.position.y = -cell.splitEndSeam;
+                                                cell.top.scale.set(1, 1, 1);
+                                                cell.bottom.scale.set(1, 1, 1);
+                                                cell.splitStartScale = cell.baseScale;
+                                                cell.splitStartSeam = cell.splitEndSeam;
                                             });
                                         }
                                     }
@@ -2413,10 +2788,17 @@ if (currentWorldRef.current === 'C') {
                                         const squeeze = stressActive ? 0.86 + 0.05 * Math.sin(elapsedTime * 8) : 1;
                                         const scaleY = stressActive ? 0.9 + 0.05 * Math.sin(elapsedTime * 9) : 1;
                                         worldDCoreCellsRef.current.forEach((cell) => {
+                                            if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null) {
+                                                return;
+                                            }
                                             const baseTop = (cell.top.userData.baseY as number) ?? cell.top.position.y;
                                             const baseBottom = (cell.bottom.userData.baseY as number) ?? cell.bottom.position.y;
-                                            cell.top.position.y = baseTop * squeeze;
-                                            cell.bottom.position.y = baseBottom * squeeze;
+                                            const restSeam = Math.max(Math.abs(baseTop), Math.abs(baseBottom));
+                                            const activeSeam = stressActive
+                                                ? Math.max(restSeam, worldDCellRadiusRef.current * WORLD_D_DYNAMIC_CLEAVAGE_SEAM_FACTOR)
+                                                : restSeam;
+                                            cell.top.position.y = activeSeam * squeeze;
+                                            cell.bottom.position.y = -activeSeam * squeeze;
                                             cell.top.scale.set(1, scaleY, 1);
                                             cell.bottom.scale.set(1, scaleY, 1);
                                         });
@@ -2519,7 +2901,11 @@ if (materialRef.current) {
                     lineMaterialRef.current.uniforms.uLineOpacity.value = LINE_OPACITY_FACTOR;
                 }
 
-                composer.render();
+                if (currentWorldRef.current === 'B') {
+                    renderer.render(scene, camera);
+                } else {
+                    composer.render();
+                }
             };
             
             clockRef.current.start();
@@ -2560,6 +2946,7 @@ if (materialRef.current) {
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
         if(composerRef.current) composerRef.current.setSize(window.innerWidth, window.innerHeight);
+        syncWorldBBackgroundPlane();
     };
     window.addEventListener('resize', handleResize);
 
@@ -2581,6 +2968,16 @@ if (materialRef.current) {
      }
      return cleanupScene;
   }, [imageSrc, initScene]);
+
+  useEffect(() => {
+    if (currentWorld === 'B') {
+      ensureWorldBBackground();
+      playWorldBBackgroundVideo();
+      return;
+    }
+
+    pauseWorldBBackgroundVideo();
+  }, [currentWorld, ensureWorldBBackground, playWorldBBackgroundVideo, pauseWorldBBackgroundVideo]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2646,7 +3043,20 @@ if (materialRef.current) {
 
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden font-sans text-white">
-      <div ref={mountRef} className="absolute inset-0 z-0" />
+      <video
+        ref={worldBVideoRef}
+        src={WORLD_B_BACKGROUND_VIDEO}
+        muted
+        loop
+        autoPlay
+        playsInline
+        preload="auto"
+        crossOrigin="anonymous"
+        className={`absolute inset-0 z-0 h-full w-full object-cover pointer-events-none transition-opacity duration-300 ${currentWorld === 'B' ? 'opacity-100' : 'opacity-0'}`}
+        style={{ filter: 'brightness(0.52) saturate(0.92) contrast(1.04)' }}
+        aria-hidden="true"
+      />
+      <div ref={mountRef} className="absolute inset-0 z-10" />
 
       {/* Intro / Empty State */}
       {!imageSrc && !loading && (
@@ -2909,9 +3319,6 @@ if (materialRef.current) {
                         {worldBUnlocked && !worldCUnlocked && !handControlEnabled && (
                             <div className="text-[10px] text-neutral-500">Tip: enable hand control to confirm Task 4.</div>
                         )}
-                        {currentWorld === 'B' && (
-                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World A{worldCUnlocked ? ', zoom in to enter World C.' : '.'}</div>
-                        )}
                         {currentWorld === 'C' && (
                             <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World B.</div>
                         )}
@@ -2960,6 +3367,7 @@ if (materialRef.current) {
                         <ControlSlider label="Particle Size" min={1} max={10} step={0.1} initial={3.5} onChange={(v) => paramsRef.current.pointSize = v} />
                         <ControlSlider label="Bloom Strength" min={0} max={3} step={0.1} initial={0.1} onChange={(v) => paramsRef.current.bloomStrength = v} />
                         <ControlSlider label="Threshold" min={0} max={0.5} step={0.01} initial={0.1} onChange={(v) => paramsRef.current.threshold = v} />
+
                     </div>
                 </div>
             </div>
@@ -2998,5 +3406,63 @@ const ControlSlider: React.FC<{
                 className="w-full h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-white hover:accent-emerald-400"
             />
         </div>
+    );
+};
+
+
+
+const TweakSlider: React.FC<{
+    label: string;
+    min: number;
+    max: number;
+    step?: number;
+    value: number;
+    onChange: (val: number) => void;
+}> = ({ label, min, max, step = 0.01, value, onChange }) => {
+    return (
+        <div className="space-y-1">
+            <div className="flex justify-between text-[10px] text-neutral-500 font-mono">
+                <span>{label}</span>
+                <span>{value.toFixed(2)}</span>
+            </div>
+            <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={value}
+                onChange={(e) => onChange(parseFloat(e.target.value))}
+                className="w-full h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-amber-300 hover:accent-amber-200"
+            />
+        </div>
+    );
+};
+
+const ColorControl: React.FC<{
+    label: string;
+    value: string;
+    onChange: (val: string) => void;
+}> = ({ label, value, onChange }) => {
+    return (
+        <label className="space-y-1 block">
+            <div className="flex justify-between text-[10px] text-neutral-500 font-mono">
+                <span>{label}</span>
+                <span>{value}</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-2 py-2">
+                <input
+                    type="color"
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="h-6 w-8 cursor-pointer rounded border border-neutral-700 bg-transparent p-0"
+                />
+                <input
+                    type="text"
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="w-full bg-transparent text-[10px] text-neutral-300 outline-none"
+                />
+            </div>
+        </label>
     );
 };
