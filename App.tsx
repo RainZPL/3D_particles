@@ -21,7 +21,7 @@ const MPCamera = (mpCameraPkg as any).Camera || (mpCameraPkg as any).default?.Ca
 const DEFAULT_IMAGE = "/A.png";
 const WORLD_B_IMAGE = "/B.png";
 const WORLD_B_MODEL = encodeURI("/B_animation/\u5b62\u5b50\u751f\u957f\u52a8\u753b.glb");
-const WORLD_B_BACKGROUND_VIDEO = encodeURI("/B_animation/background.mp4");
+const WORLD_B_BACKGROUND_VIDEO = encodeURI("/B_animation/background_loop.mp4");
 const WORLD_B_BRANCH_COLOR = encodeURI("/B_animation/\u679d\u5e72\u8272\u5f69.png");
 const WORLD_B_BRANCH_ROUGHNESS = encodeURI("/B_animation/\u679d\u5e72\u7cd9\u5ea6.png");
 const WORLD_B_BRANCH_NORMAL = encodeURI("/B_animation/\u679d\u5e72\u6cd5\u5411.png");
@@ -857,7 +857,7 @@ export function App() {
     if (!video) return;
 
     const tryPlay = () => {
-      if (Number.isFinite(video.duration) && video.currentTime >= Math.max(video.duration - 0.05, 0)) {
+      if (Number.isFinite(video.duration) && video.duration > 0 && video.currentTime >= Math.max(video.duration - 0.04, 0)) {
         try {
           video.currentTime = 0;
         } catch {
@@ -872,14 +872,14 @@ export function App() {
       }
     };
 
-    video.loop = true;
+    video.loop = false;
     video.muted = true;
     video.defaultMuted = true;
     video.playsInline = true;
     video.autoplay = true;
     video.playbackRate = 1;
 
-    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
       tryPlay();
       return;
     }
@@ -917,7 +917,7 @@ export function App() {
     if (!video.src) {
       video.src = WORLD_B_BACKGROUND_VIDEO;
     }
-    video.loop = true;
+    video.loop = false;
     video.muted = true;
     video.defaultMuted = true;
     video.playsInline = true;
@@ -932,16 +932,23 @@ export function App() {
 
     if (!worldBVideoListenersBoundRef.current) {
       const requestResume = () => {
-        if (currentWorldRef.current === 'B') {
-          worldBVideoResumeCooldownRef.current = 0;
-          playWorldBBackgroundVideo();
+        if (currentWorldRef.current !== 'B') return;
+        if (Number.isFinite(video.duration) && video.duration > 0 && (video.ended || video.currentTime >= Math.max(video.duration - 0.04, 0))) {
+          try {
+            video.currentTime = 0;
+          } catch {
+            // Ignore reset failures until metadata is ready.
+          }
         }
+        worldBVideoResumeCooldownRef.current = 0;
+        playWorldBBackgroundVideo();
       };
       video.addEventListener('ended', requestResume);
       video.addEventListener('stalled', requestResume);
       video.addEventListener('waiting', requestResume);
       video.addEventListener('suspend', requestResume);
       video.addEventListener('error', requestResume);
+      video.addEventListener('emptied', requestResume);
       worldBVideoListenersBoundRef.current = true;
     }
 
@@ -2540,9 +2547,52 @@ export function App() {
                     const worldBVideo = worldBVideoRef.current;
                     if (worldBVideo && currentWorldRef.current === 'B') {
                         const now = performance.now();
-                        if (!document.hidden && (worldBVideo.paused || worldBVideo.ended) && now >= worldBVideoResumeCooldownRef.current) {
-                            worldBVideoResumeCooldownRef.current = now + 1200;
+                        if (
+                            Number.isFinite(worldBVideo.duration) &&
+                            worldBVideo.duration > 0 &&
+                            worldBVideo.currentTime >= Math.max(worldBVideo.duration - 0.04, 0) &&
+                            now >= worldBVideoResumeCooldownRef.current
+                        ) {
+                            worldBVideoResumeCooldownRef.current = now + 500;
+                            try {
+                                worldBVideo.currentTime = 0;
+                            } catch {
+                                // Ignore seek failures and let the retry path recover.
+                            }
                             playWorldBBackgroundVideo();
+                        } else if (!document.hidden && !worldBVideo.paused && !worldBVideo.ended && worldBVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+                            if (Math.abs(worldBVideo.currentTime - worldBVideoLastTimeRef.current) > 0.001) {
+                                worldBVideoLastTimeRef.current = worldBVideo.currentTime;
+                                worldBVideoStallSinceRef.current = null;
+                            } else {
+                                if (worldBVideoStallSinceRef.current === null) {
+                                    worldBVideoStallSinceRef.current = now;
+                                } else if (now - worldBVideoStallSinceRef.current > 900 && now >= worldBVideoResumeCooldownRef.current) {
+                                    worldBVideoResumeCooldownRef.current = now + 1200;
+                                    worldBVideoStallSinceRef.current = now;
+                                    if (Number.isFinite(worldBVideo.duration) && worldBVideo.duration > 0 && worldBVideo.currentTime >= Math.max(worldBVideo.duration - 0.08, 0)) {
+                                        try {
+                                            worldBVideo.currentTime = 0;
+                                        } catch {
+                                            // Ignore seek failures and rely on play retry.
+                                        }
+                                    }
+                                    playWorldBBackgroundVideo();
+                                }
+                            }
+                        } else {
+                            worldBVideoStallSinceRef.current = null;
+                            if (!document.hidden && (worldBVideo.paused || worldBVideo.ended) && now >= worldBVideoResumeCooldownRef.current) {
+                                worldBVideoResumeCooldownRef.current = now + 1200;
+                                if (worldBVideo.ended) {
+                                    try {
+                                        worldBVideo.currentTime = 0;
+                                    } catch {
+                                        // Ignore seek failures until metadata is ready.
+                                    }
+                                }
+                                playWorldBBackgroundVideo();
+                            }
                         }
                     }
                     worldBRotationVelocityRef.current = THREE.MathUtils.lerp(worldBRotationVelocityRef.current, 0, 0.1);
@@ -3047,7 +3097,6 @@ if (materialRef.current) {
         ref={worldBVideoRef}
         src={WORLD_B_BACKGROUND_VIDEO}
         muted
-        loop
         autoPlay
         playsInline
         preload="auto"
