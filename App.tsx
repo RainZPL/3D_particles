@@ -6,7 +6,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 import { vertexShader, fragmentShader, lineFragmentShader } from './shaders';
-import { Camera, RefreshCcw, Upload, Settings, AlertCircle, Hand, Video, VideoOff } from 'lucide-react';
+import { Camera, RefreshCcw, Upload, Settings, AlertCircle, Hand, Video, VideoOff, Move, ZoomIn, ZoomOut, RotateCcw, CircleDot } from 'lucide-react';
 // Import MediaPipe safely handling ESM export variations
 import * as mpHandsPkg from '@mediapipe/hands';
 import type { Results } from '@mediapipe/hands';
@@ -76,6 +76,10 @@ const WORLD_D_SPLIT_START_OFFSET_FACTOR = 0.08;
 const WORLD_D_SPLIT_START_SCALE_FACTOR = 0.88;
 const WORLD_D_DAUGHTER_REST_SEAM_FACTOR = 0.02;
 const WORLD_D_DYNAMIC_CLEAVAGE_SEAM_FACTOR = 0.18;
+const WORLD_D_COLLISION_BOUNCE = 0.16;
+const WORLD_D_COLLISION_DAMP = 0.82;
+const WORLD_D_COLLISION_RELAX = 0.08;
+const WORLD_D_COLLISION_RESPONSE = 0.7;
 const OK_HOLD_MS = 3000;
 const WORLD_SWITCH_COOLDOWN_MS = 350;
 
@@ -129,6 +133,73 @@ type WorldDCoreCell = {
   splitStartScale: number;
   splitStartSeam: number;
   splitEndSeam: number;
+  collisionRadius: number;
+  collisionOffset: THREE.Vector3;
+  collisionVelocity: THREE.Vector3;
+};
+type WorldDFloater = {
+  group: THREE.Group;
+  base: THREE.Vector3;
+  axis: THREE.Vector3;
+  axis2: THREE.Vector3;
+  amp: number;
+  amp2: number;
+  speed: number;
+  phase: number;
+  spin: number;
+  radius: number;
+  collidable: boolean;
+  collisionOffset: THREE.Vector3;
+  collisionVelocity: THREE.Vector3;
+};
+
+const OPERATION_GUIDE_SECTIONS = [
+  {
+    title: 'Core Controls',
+    items: [
+      { hand: 'R', icon: 'move', action: 'Pan View', detail: 'Move hand' },
+      { hand: 'R', icon: 'zoomIn', action: 'Zoom In', detail: 'Pinch close' },
+      { hand: 'R', icon: 'zoomOut', action: 'Zoom Out', detail: 'Pinch open' },
+      { hand: 'L', icon: 'ok', action: 'Enter Gate', detail: 'OK 3s in deep zone' },
+    ],
+  },
+  {
+    title: 'World B',
+    items: [
+      { hand: 'L', icon: 'rotate', action: 'Rotate Model', detail: 'Twist wrist' },
+    ],
+  },
+  {
+    title: 'World C',
+    items: [
+      { hand: 'R', icon: 'zoomIn', action: 'Focus Core', detail: 'Zoom to center' },
+      { hand: 'L', icon: 'rotate', action: 'Rotate Core', detail: 'Twist wrist' },
+      { hand: 'L', icon: 'hand', action: 'Stress / Split', detail: 'Hold fist' },
+    ],
+  },
+  {
+    title: 'Navigation',
+    items: [
+      { hand: 'R', icon: 'zoomOut', action: 'Return', detail: 'Zoom out a world' },
+    ],
+  },
+] as const;
+
+const GuideIcon = ({ icon }: { icon: string }) => {
+  switch (icon) {
+    case 'move':
+      return <Move className="h-4 w-4" />;
+    case 'zoomIn':
+      return <ZoomIn className="h-4 w-4" />;
+    case 'zoomOut':
+      return <ZoomOut className="h-4 w-4" />;
+    case 'rotate':
+      return <RotateCcw className="h-4 w-4" />;
+    case 'ok':
+      return <CircleDot className="h-4 w-4" />;
+    default:
+      return <Hand className="h-4 w-4" />;
+  }
 };
 
 export function App() {
@@ -160,6 +231,7 @@ export function App() {
   const [worldDStressProgress, setWorldDStressProgress] = useState(0);
   const [worldDStressActive, setWorldDStressActive] = useState(false);
   const [worldDZoomProgress, setWorldDZoomProgress] = useState(0);
+  const [showOperationGuide, setShowOperationGuide] = useState(true);
   const [, setWorldCLoading] = useState(false);
   const currentWorldRef = useRef<'A' | 'B' | 'C' | 'D'>('A');
   const worldBUnlockedRef = useRef(false);
@@ -240,17 +312,7 @@ export function App() {
   const worldDGrooveRef = useRef<THREE.Mesh | null>(null);
   const worldDParticlesRef = useRef<THREE.Points | null>(null);
   const worldDParticleDataRef = useRef<{ positions: Float32Array; velocities: Float32Array; basePositions: Float32Array } | null>(null);
-  const worldDFloatersRef = useRef<Array<{
-    group: THREE.Group;
-    base: THREE.Vector3;
-    axis: THREE.Vector3;
-    axis2: THREE.Vector3;
-    amp: number;
-    amp2: number;
-    speed: number;
-    phase: number;
-    spin: number;
-  }>>([]);
+  const worldDFloatersRef = useRef<WorldDFloater[]>([]);
   const worldDMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
   const worldDGrooveMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
   const worldDCoreCellsRef = useRef<WorldDCoreCell[]>([]);
@@ -1235,6 +1297,9 @@ export function App() {
       splitStartScale: startScale,
       splitStartSeam: startSeam,
       splitEndSeam: endSeam,
+      collisionRadius: worldDCellRadiusRef.current * 0.94,
+      collisionOffset: new THREE.Vector3(),
+      collisionVelocity: new THREE.Vector3(),
     };
   }, []);
 
@@ -1259,14 +1324,12 @@ export function App() {
 
     cells.forEach((cell, idx) => {
       const base = cell.baseOffset.clone();
-      const angle = ((idx + 0.5) / Math.max(1, cells.length)) * Math.PI * 2 + generation * 0.37;
-      const axis = new THREE.Vector3(
-        Math.cos(angle),
-        Math.sin(angle * 1.3) * 0.22,
-        Math.sin(angle)
-      ).normalize();
+      const axis = new THREE.Vector3(0, 1, 0);
       const offset = axis.clone().multiplyScalar(spacing);
       const startOffset = offset.clone().multiplyScalar(WORLD_D_SPLIT_START_OFFSET_FACTOR);
+      const spreadAngle = ((idx + 0.5) / Math.max(1, cells.length)) * Math.PI * 2 + generation * 0.73;
+      const lateralSpread = new THREE.Vector3(Math.cos(spreadAngle), 0, Math.sin(spreadAngle))
+        .multiplyScalar(spacing * (0.34 + Math.min(generation, 4) * 0.06));
       const nextScale = cell.baseScale * WORLD_D_SPLIT_SCALE_FACTOR;
       const startScale = nextScale * WORLD_D_SPLIT_START_SCALE_FACTOR;
       const restSeam = Math.abs((cell.top.userData.baseY as number) ?? (worldDCellRadiusRef.current * worldDCellSeamOffsetRef.current));
@@ -1286,8 +1349,12 @@ export function App() {
       });
       if (!childA || !childB) return;
 
-      childA.targetOffset.copy(base).add(offset);
-      childB.targetOffset.copy(base).sub(offset);
+      childA.targetOffset.copy(base).add(offset).add(lateralSpread);
+      childB.targetOffset.copy(base).sub(offset).sub(lateralSpread);
+      childA.collisionOffset.copy(cell.collisionOffset).addScaledVector(lateralSpread, 0.08);
+      childB.collisionOffset.copy(cell.collisionOffset).addScaledVector(lateralSpread, -0.08);
+      childA.collisionVelocity.copy(cell.collisionVelocity).addScaledVector(lateralSpread.clone().normalize(), spacing * 0.01);
+      childB.collisionVelocity.copy(cell.collisionVelocity).addScaledVector(lateralSpread.clone().normalize(), -spacing * 0.01);
 
       coreGroup.add(childA.group, childB.group);
       nextCells.push(childA, childB);
@@ -1347,17 +1414,7 @@ export function App() {
     coreGroup.scale.setScalar(1.08);
     group.add(coreGroup);
 
-    const floaters: Array<{
-      group: THREE.Group;
-      base: THREE.Vector3;
-      axis: THREE.Vector3;
-      axis2: THREE.Vector3;
-      amp: number;
-      amp2: number;
-      speed: number;
-      phase: number;
-      spin: number;
-    }> = [];
+    const floaters: WorldDFloater[] = [];
 
     let seed = 19.73;
     const rand = () => {
@@ -1374,7 +1431,7 @@ export function App() {
       return axis.normalize();
     };
 
-    const registerFloater = (cell: THREE.Group, basePos: THREE.Vector3, isCore: boolean) => {
+    const registerFloater = (cell: THREE.Group, basePos: THREE.Vector3, isCore: boolean, radiusScale = 1) => {
       const axis = makeAxis();
       const axis2 = makeAxis();
       if (isCore) {
@@ -1388,7 +1445,21 @@ export function App() {
       const speed = isCore ? 0.12 : THREE.MathUtils.lerp(0.12, 0.28, rand());
       const phase = rand() * Math.PI * 2;
       const spin = isCore ? 0 : THREE.MathUtils.lerp(-0.05, 0.05, rand());
-      floaters.push({ group: cell, base: basePos.clone(), axis, axis2, amp, amp2, speed, phase, spin });
+      floaters.push({
+        group: cell,
+        base: basePos.clone(),
+        axis,
+        axis2,
+        amp,
+        amp2,
+        speed,
+        phase,
+        spin,
+        radius: radius * radiusScale * 0.94,
+        collidable: !isCore,
+        collisionOffset: new THREE.Vector3(),
+        collisionVelocity: new THREE.Vector3(),
+      });
     };
 
     const createSatellite = (direction: THREE.Vector3, distance: number, scale: number) => {
@@ -1427,7 +1498,7 @@ export function App() {
       const cell = createSatellite(direction, distance, scale);
       cell.rotation.set(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI);
       group.add(cell);
-      registerFloater(cell, cell.position.clone(), false);
+      registerFloater(cell, cell.position.clone(), false, scale);
     }
 
     worldDFloatersRef.current = floaters;
@@ -2766,56 +2837,105 @@ if (currentWorldRef.current === 'A' && worldBUnlockedRef.current) {
                                 }
 
 if (currentWorldRef.current === 'C') {
+                                    const rootGroup = worldDGroupRef.current;
+                                    const coreGroup = worldDCoreGroupRef.current;
+                                    const stressActive = worldDStressActiveRef.current;
+                                    const pulse = 0.5 + 0.5 * Math.sin(elapsedTime * 6);
+                                    const squeeze = stressActive ? 0.86 + 0.05 * Math.sin(elapsedTime * 8) : 1;
+                                    const scaleY = stressActive ? 0.9 + 0.05 * Math.sin(elapsedTime * 9) : 1;
+                                    const groupScale = stressActive ? 1 + 0.015 * Math.sin(elapsedTime * 6) : 1;
+                                    const collisionStep = Math.min(frameDelta * 60, 2);
+
+                                    if (coreGroup) {
+                                        coreGroup.scale.setScalar(groupScale);
+                                    }
+
+                                    let splitProgress = 1;
+                                    let separationProgress = 1;
+                                    let roundingProgress = 1;
+                                    if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null) {
+                                        const splitElapsed = performance.now() - worldDSplitStartRef.current;
+                                        splitProgress = THREE.MathUtils.clamp(splitElapsed / WORLD_D_SPLIT_ANIM_MS, 0, 1);
+                                        separationProgress = THREE.MathUtils.smoothstep(splitProgress, 0.12, 1);
+                                        roundingProgress = THREE.MathUtils.smoothstep(splitProgress, 0.18, 1);
+                                    }
+
+                                    const colliders: Array<{
+                                        position: THREE.Vector3;
+                                        radius: number;
+                                        collisionOffset: THREE.Vector3;
+                                        collisionVelocity: THREE.Vector3;
+                                        apply: (position: THREE.Vector3) => void;
+                                    }> = [];
+
                                     if (worldDFloatersRef.current.length) {
                                         worldDFloatersRef.current.forEach((floater) => {
                                             const t = elapsedTime * floater.speed + floater.phase;
                                             floatOffset.copy(floater.axis).multiplyScalar(Math.sin(t) * floater.amp);
                                             floatOffset2.copy(floater.axis2).multiplyScalar(Math.cos(t * 0.7) * floater.amp2);
-                                            floater.group.position.copy(floater.base).add(floatOffset).add(floatOffset2);
+                                            const targetPosition = floater.base.clone().add(floatOffset).add(floatOffset2);
                                             if (floater.spin !== 0) {
                                                 floater.group.rotation.y += floater.spin * frameDelta;
                                             }
-                                        });
-                                    }
-
-                                    if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null) {
-                                        const splitElapsed = performance.now() - worldDSplitStartRef.current;
-                                        const splitProgress = THREE.MathUtils.clamp(splitElapsed / WORLD_D_SPLIT_ANIM_MS, 0, 1);
-                                        const separationProgress = THREE.MathUtils.smoothstep(splitProgress, 0.12, 1);
-                                        const roundingProgress = THREE.MathUtils.smoothstep(splitProgress, 0.18, 1);
-                                        const cleavageProgress = THREE.MathUtils.smoothstep(splitProgress, 0, 0.45);
-                                        worldDCoreCellsRef.current.forEach((cell, idx) => {
-                                            cell.group.position.lerpVectors(cell.baseOffset, cell.targetOffset, separationProgress);
-                                            const wobble = 1 + (1 - splitProgress) * 0.025 * Math.sin(elapsedTime * 8 + idx * 0.9);
-                                            const liveScale = THREE.MathUtils.lerp(cell.splitStartScale, cell.baseScale, roundingProgress);
-                                            cell.group.scale.setScalar(liveScale * wobble);
-
-                                            const seam = THREE.MathUtils.lerp(cell.splitStartSeam, cell.splitEndSeam, roundingProgress);
-                                            const stretchXZ = THREE.MathUtils.lerp(1.12, 1, cleavageProgress);
-                                            const stretchY = THREE.MathUtils.lerp(0.78, 1, roundingProgress);
-                                            cell.top.position.y = seam;
-                                            cell.bottom.position.y = -seam;
-                                            cell.top.scale.set(stretchXZ, stretchY, stretchXZ);
-                                            cell.bottom.scale.set(stretchXZ, stretchY, stretchXZ);
-                                        });
-                                        if (splitProgress >= 1) {
-                                            worldDSplitAnimatingRef.current = false;
-                                            worldDSplitStartRef.current = null;
-                                            worldDCoreCellsRef.current.forEach((cell) => {
-                                                cell.baseOffset.copy(cell.targetOffset);
-                                                cell.group.position.copy(cell.targetOffset);
-                                                cell.group.scale.setScalar(cell.baseScale);
-                                                cell.top.position.y = cell.splitEndSeam;
-                                                cell.bottom.position.y = -cell.splitEndSeam;
-                                                cell.top.scale.set(1, 1, 1);
-                                                cell.bottom.scale.set(1, 1, 1);
-                                                cell.splitStartScale = cell.baseScale;
-                                                cell.splitStartSeam = cell.splitEndSeam;
+                                            if (!floater.collidable) {
+                                                floater.group.position.copy(targetPosition);
+                                                return;
+                                            }
+                                            floater.collisionOffset.addScaledVector(floater.collisionVelocity, collisionStep);
+                                            floater.collisionVelocity.multiplyScalar(Math.pow(WORLD_D_COLLISION_DAMP, collisionStep));
+                                            floater.collisionOffset.multiplyScalar(Math.max(0, 1 - WORLD_D_COLLISION_RELAX * collisionStep));
+                                            colliders.push({
+                                                position: targetPosition.add(floater.collisionOffset),
+                                                radius: floater.radius * Math.max(floater.group.scale.x, 0.001),
+                                                collisionOffset: floater.collisionOffset,
+                                                collisionVelocity: floater.collisionVelocity,
+                                                apply: (position) => {
+                                                    floater.group.position.copy(position);
+                                                },
                                             });
-                                        }
+                                        });
                                     }
 
-                                    const stressActive = worldDStressActiveRef.current;
+                                    if (rootGroup && coreGroup) {
+                                        rootGroup.updateMatrixWorld(true);
+                                        worldDCoreCellsRef.current.forEach((cell, idx) => {
+                                            const cellTargetLocal = cell.baseOffset.clone();
+                                            if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null) {
+                                                cellTargetLocal.lerp(cell.targetOffset, separationProgress);
+                                                const wobble = 1 + (1 - splitProgress) * 0.025 * Math.sin(elapsedTime * 8 + idx * 0.9);
+                                                const liveScale = THREE.MathUtils.lerp(cell.splitStartScale, cell.baseScale, roundingProgress);
+                                                cell.group.scale.setScalar(liveScale * wobble);
+
+                                                const seam = THREE.MathUtils.lerp(cell.splitStartSeam, cell.splitEndSeam, roundingProgress);
+                                                const stretchXZ = THREE.MathUtils.lerp(0.92, 1, roundingProgress);
+                                                const stretchY = THREE.MathUtils.lerp(1.18, 1, roundingProgress);
+                                                cell.top.position.y = seam;
+                                                cell.bottom.position.y = -seam;
+                                                cell.top.scale.set(stretchXZ, stretchY, stretchXZ);
+                                                cell.bottom.scale.set(stretchXZ, stretchY, stretchXZ);
+                                            } else {
+                                                cell.group.scale.setScalar(cell.baseScale);
+                                            }
+
+                                            const cellWorldTarget = coreGroup.localToWorld(cellTargetLocal.clone());
+                                            const groupLocalTarget = rootGroup.worldToLocal(cellWorldTarget);
+                                            cell.collisionOffset.addScaledVector(cell.collisionVelocity, collisionStep);
+                                            cell.collisionVelocity.multiplyScalar(Math.pow(WORLD_D_COLLISION_DAMP, collisionStep));
+                                            cell.collisionOffset.multiplyScalar(Math.max(0, 1 - WORLD_D_COLLISION_RELAX * collisionStep));
+                                            colliders.push({
+                                                position: groupLocalTarget.add(cell.collisionOffset),
+                                                radius: cell.collisionRadius * Math.max(cell.group.scale.x, 0.001) * Math.max(coreGroup.scale.x, 0.001),
+                                                collisionOffset: cell.collisionOffset,
+                                                collisionVelocity: cell.collisionVelocity,
+                                                apply: (position) => {
+                                                    const worldPosition = rootGroup.localToWorld(position.clone());
+                                                    const localPosition = coreGroup.worldToLocal(worldPosition);
+                                                    cell.group.position.copy(localPosition);
+                                                },
+                                            });
+                                        });
+                                    }
+
                                     if (stressActive) {
                                         if (!worldDStressHoldStartRef.current) {
                                             worldDStressHoldStartRef.current = performance.now();
@@ -2833,10 +2953,56 @@ if (currentWorldRef.current === 'C') {
                                         worldDSplitTriggerLatchRef.current = false;
                                     }
 
-                                    if (worldDCoreGroupRef.current) {
-                                        const pulse = 0.5 + 0.5 * Math.sin(elapsedTime * 6);
-                                        const squeeze = stressActive ? 0.86 + 0.05 * Math.sin(elapsedTime * 8) : 1;
-                                        const scaleY = stressActive ? 0.9 + 0.05 * Math.sin(elapsedTime * 9) : 1;
+                                    if (colliders.length > 1) {
+                                        for (let pass = 0; pass < 2; pass++) {
+                                            for (let i = 0; i < colliders.length; i++) {
+                                                for (let j = i + 1; j < colliders.length; j++) {
+                                                    const a = colliders[i];
+                                                    const b = colliders[j];
+                                                    const delta = b.position.clone().sub(a.position);
+                                                    const minDistance = a.radius + b.radius;
+                                                    let distance = delta.length();
+                                                    if (distance >= minDistance) {
+                                                        continue;
+                                                    }
+                                                    const normal = distance > 0.001
+                                                        ? delta.multiplyScalar(1 / distance)
+                                                        : new THREE.Vector3(Math.cos((i + 1) * 1.7), ((i + j) % 2 === 0 ? 1 : -1) * 0.35, Math.sin((j + 1) * 1.3)).normalize();
+                                                    distance = Math.max(distance, 0.001);
+                                                    const overlap = minDistance - distance;
+                                                    const correction = normal.clone().multiplyScalar(overlap * 0.5 * WORLD_D_COLLISION_RESPONSE);
+                                                    a.position.addScaledVector(correction, -1);
+                                                    b.position.add(correction);
+                                                    a.collisionOffset.addScaledVector(correction, -1);
+                                                    b.collisionOffset.add(correction);
+                                                    const impulse = normal.clone().multiplyScalar(overlap * WORLD_D_COLLISION_BOUNCE);
+                                                    a.collisionVelocity.addScaledVector(impulse, -1);
+                                                    b.collisionVelocity.add(impulse);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    colliders.forEach((collider) => {
+                                        collider.apply(collider.position);
+                                    });
+
+                                    if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null && splitProgress >= 1) {
+                                        worldDSplitAnimatingRef.current = false;
+                                        worldDSplitStartRef.current = null;
+                                        worldDCoreCellsRef.current.forEach((cell) => {
+                                            cell.baseOffset.copy(cell.targetOffset);
+                                            cell.group.scale.setScalar(cell.baseScale);
+                                            cell.top.position.y = cell.splitEndSeam;
+                                            cell.bottom.position.y = -cell.splitEndSeam;
+                                            cell.top.scale.set(1, 1, 1);
+                                            cell.bottom.scale.set(1, 1, 1);
+                                            cell.splitStartScale = cell.baseScale;
+                                            cell.splitStartSeam = cell.splitEndSeam;
+                                        });
+                                    }
+
+                                    if (coreGroup) {
                                         worldDCoreCellsRef.current.forEach((cell) => {
                                             if (worldDSplitAnimatingRef.current && worldDSplitStartRef.current !== null) {
                                                 return;
@@ -2852,8 +3018,6 @@ if (currentWorldRef.current === 'C') {
                                             cell.top.scale.set(1, scaleY, 1);
                                             cell.bottom.scale.set(1, scaleY, 1);
                                         });
-                                        const groupScale = stressActive ? 1 + 0.015 * Math.sin(elapsedTime * 6) : 1;
-                                        worldDCoreGroupRef.current.scale.setScalar(groupScale);
                                         if (worldDMaterialRef.current) {
                                             if (stressActive) {
                                                 worldDMaterialRef.current.color.setHex(0xfff1bf);
@@ -2910,6 +3074,7 @@ if (currentWorldRef.current === 'C') {
                                         }
                                     }
                                 }
+
 
 if (materialRef.current) {
                     materialRef.current.uniforms.uTime.value = elapsedTime;
@@ -3090,6 +3255,19 @@ if (materialRef.current) {
   };
 
   const growthPercentage = Math.min(100, Math.floor((growth / MAX_GROWTH) * 100));
+  const inlineGuideSections = OPERATION_GUIDE_SECTIONS.filter((section) => {
+    if (section.title === 'Core Controls' || section.title === 'Navigation') {
+      return true;
+    }
+    if (section.title === 'World B') {
+      return currentWorld === 'B';
+    }
+    if (section.title === 'World C') {
+      return currentWorld === 'C';
+    }
+    return false;
+  });
+  const inlineGuideItems = inlineGuideSections.flatMap((section) => section.items);
 
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden font-sans text-white">
@@ -3146,24 +3324,82 @@ if (materialRef.current) {
         </div>
       )}
 
-      {/* Video Element for MediaPipe (Hidden but functional) */}
-      <video 
-        ref={videoRef} 
-        className={`absolute top-24 right-6 w-32 h-24 rounded-lg object-cover border-2 border-emerald-500/50 z-20 ${handControlEnabled ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
-        style={{ transform: 'scaleX(-1)' }}
-        playsInline 
-      />
+      {imageSrc && !loading && showOperationGuide && (
+        <div className="absolute inset-0 z-40 overflow-y-auto bg-black/72 px-3 py-3 backdrop-blur-sm sm:px-6 sm:py-6">
+          <div className="mx-auto flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-950/92 shadow-2xl max-h-[calc(100vh-1.5rem)] sm:max-h-[calc(100vh-3rem)]">
+            <div className="flex shrink-0 flex-col gap-4 border-b border-neutral-800 bg-neutral-950/96 px-4 py-4 sm:px-6 sm:py-5 md:flex-row md:items-start md:justify-between md:px-8 md:py-6">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.28em] text-emerald-400/80">Interaction Guide</div>
+                <h3 className="mt-2 text-xl font-light tracking-[0.1em] text-white sm:text-2xl">How To Explore</h3>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-neutral-400">
+                  Use both hands to navigate, unlock deeper worlds, and control the live models.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowOperationGuide(false)}
+                className="self-start rounded-full border border-neutral-700 px-4 py-2 text-xs uppercase tracking-[0.22em] text-neutral-200 transition-colors hover:border-emerald-500 hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="overflow-y-auto px-4 py-4 sm:px-6 sm:py-5 md:px-8 md:py-6">
+              <div className="grid gap-3 sm:gap-4 md:grid-cols-2">
+                {OPERATION_GUIDE_SECTIONS.map((section) => (
+                  <div key={section.title} className="rounded-xl border border-neutral-800 bg-neutral-900/55 p-3 sm:p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-300">{section.title}</div>
+                    <div className="mt-3 grid gap-2">
+                      {section.items.map((item) => (
+                        <div key={`${section.title}-${item.action}`} className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-black/25 px-3 py-2.5">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-500/12 text-emerald-300">
+                            <GuideIcon icon={item.icon} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="rounded-full border border-emerald-500/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-200">{item.hand}</span>
+                              <span className="text-sm text-white">{item.action}</span>
+                            </div>
+                            <div className="mt-0.5 text-xs text-neutral-400">{item.detail}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-5 flex flex-col gap-3 border-t border-neutral-800 pt-4 text-xs text-neutral-500 md:flex-row md:items-center md:justify-between">
+                <span>The same guide stays available in the Configuration panel after this window is closed.</span>
+                <button
+                  onClick={() => setShowOperationGuide(false)}
+                  className="rounded-full bg-emerald-500 px-5 py-2 text-xs font-medium uppercase tracking-[0.2em] text-black transition-colors hover:bg-emerald-400"
+                >
+                  Start Exploring
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Controls */}
       {imageSrc && !loading && (
         <>
-            <div className="absolute top-0 left-0 w-full p-6 flex justify-between items-start z-10 pointer-events-none">
+            <div className="absolute top-0 left-0 z-30 flex w-full flex-wrap items-start justify-between gap-3 p-3 pointer-events-none sm:p-6">
                 <div>
                     <h2 className="text-xl font-light tracking-widest text-white/80">PHYSARUM</h2>
                     <p className="text-xs text-emerald-500/80 font-mono mt-1">PARTICLE: {growthPercentage}% GROWTH</p>
                 </div>
                 
-                <div className="flex gap-4 pointer-events-auto items-center">
+                <div className="flex gap-3 pointer-events-auto items-center sm:gap-4">
+                    {handControlEnabled && (
+                        <video
+                            ref={videoRef}
+                            className="h-14 w-20 rounded-lg object-cover border border-emerald-500/45 bg-black/40 shadow-[0_0_24px_rgba(16,185,129,0.14)] sm:h-16 sm:w-24 md:h-20 md:w-28"
+                            style={{ transform: 'scaleX(-1)' }}
+                            playsInline
+                        />
+                    )}
                     <button 
                         onClick={toggleHandControl}
                         className={`p-3 border rounded-full text-white transition-colors ${handControlEnabled ? 'bg-emerald-900/80 border-emerald-500' : 'bg-neutral-900/80 border-neutral-800 hover:border-emerald-500'}`}
@@ -3185,8 +3421,9 @@ if (materialRef.current) {
                 </div>
             </div>
 
-            <div className="absolute bottom-6 left-6 z-10 w-80 pointer-events-auto">
-                <div className="bg-neutral-950/80 backdrop-blur-md border border-neutral-800 rounded-xl p-6 shadow-2xl">
+            <div className="absolute inset-x-3 bottom-3 z-20 flex flex-col gap-3 pointer-events-none sm:inset-x-4 sm:bottom-4 md:inset-x-0 md:bottom-0">
+                <div className="pointer-events-auto w-full md:absolute md:bottom-6 md:left-6 md:w-80">
+                    <div className="bg-neutral-950/80 backdrop-blur-md border border-neutral-800 rounded-xl p-4 shadow-2xl max-h-[28vh] overflow-y-auto sm:p-5 md:max-h-[min(32rem,calc(100vh-8rem))] md:p-6">
                     <div className="flex items-center gap-2 mb-4 text-emerald-400 border-b border-neutral-800 pb-2">
                         <span className="text-xs font-bold tracking-widest uppercase">Mission</span>
                     </div>
@@ -3375,27 +3612,53 @@ if (materialRef.current) {
                 </div>
             </div>
 
-            <div className="absolute bottom-6 right-6 z-10 w-80 pointer-events-auto">
-                <div className="bg-neutral-950/80 backdrop-blur-md border border-neutral-800 rounded-xl p-6 shadow-2xl">
+                <div className="pointer-events-auto w-full md:absolute md:bottom-6 md:right-6 md:w-80">
+                    <div className="bg-neutral-950/80 backdrop-blur-md border border-neutral-800 rounded-xl p-4 shadow-2xl max-h-[34vh] overflow-y-auto sm:p-5 md:max-h-[min(34rem,calc(100vh-8rem))] md:p-6">
                     <div className="flex items-center gap-2 mb-4 text-emerald-400 border-b border-neutral-800 pb-2">
                         <Settings className="w-4 h-4" />
                         <span className="text-xs font-bold tracking-widest uppercase">Configuration</span>
                     </div>
 
+
                     <div className="space-y-5">
-                         {handControlEnabled && (
-                             <div className="bg-emerald-900/20 p-2 rounded border border-emerald-500/20 text-xs text-emerald-200 mb-2 flex flex-col gap-1">
-                                <div className="flex items-center gap-2">
+                        <div className="rounded-lg border border-emerald-500/20 bg-emerald-900/20 p-3 text-xs text-emerald-100">
+                            <div className="mb-3 flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2 text-emerald-200">
                                     <Hand className="w-3 h-3" />
-                                    <span className="font-bold">Right Hand Active</span>
+                                    <span className="font-bold uppercase tracking-[0.2em]">Interaction Guide</span>
                                 </div>
-                                <span className="opacity-70 pl-5">Move hand to pan</span>
-                                <span className="opacity-70 pl-5">👌Pinch close: Zoom In</span>
-                                <span className="opacity-70 pl-5">🖐Pinch open: Zoom Out</span>
-                             </div>
-                         )}
+                                <button
+                                    onClick={() => setShowOperationGuide(true)}
+                                    className="rounded-full border border-emerald-500/30 px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-emerald-100 transition-colors hover:border-emerald-400 hover:text-white"
+                                >
+                                    Open Guide
+                                </button>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                                {inlineGuideItems.map((item) => (
+                                    <div key={`${item.hand}-${item.action}`} className="rounded-lg border border-emerald-500/10 bg-black/20 px-2.5 py-2">
+                                        <div className="flex items-center gap-2 text-emerald-200">
+                                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-500/12 text-emerald-300">
+                                                <GuideIcon icon={item.icon} />
+                                            </div>
+                                            <span className="rounded-full border border-emerald-500/25 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-emerald-100">{item.hand}</span>
+                                        </div>
+                                        <div className="mt-2 text-[11px] font-medium leading-4 text-white">{item.action}</div>
+                                        <div className="mt-1 text-[10px] leading-4 text-emerald-100/72">{item.detail}</div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            {!handControlEnabled && (
+                                <div className="mt-3 border-t border-emerald-500/15 pt-3 text-[10px] text-emerald-200/75">
+                                    Enable hand control from the top-right video button.
+                                </div>
+                            )}
+                        </div>
 
                         <div className="space-y-1">
+
                             <div className="flex justify-between text-xs text-neutral-400">
                                 <span>Growth Progress</span>
                                 <span>{growthPercentage}%</span>
@@ -3419,6 +3682,7 @@ if (materialRef.current) {
 
                     </div>
                 </div>
+            </div>
             </div>
         </>
       )}
