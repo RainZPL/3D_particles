@@ -82,6 +82,7 @@ const WORLD_D_COLLISION_RELAX = 0.08;
 const WORLD_D_COLLISION_RESPONSE = 0.7;
 const OK_HOLD_MS = 3000;
 const WORLD_SWITCH_COOLDOWN_MS = 350;
+const EXPERIENCE_RESTART_DELAY_MS = 60000;
 
 // Fallback in case A.png is missing
 const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1563089145-599997674d42?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80";
@@ -95,6 +96,7 @@ const ZOOM_IN_RANGE = 0.045;
 const ZOOM_OUT_RANGE = 0.14;
 
 type ViewState = { position: THREE.Vector3; target: THREE.Vector3 };
+type WorldGatePrompt = 'B' | 'C';
 type WorldBTextureSet = {
   branchColor: THREE.Texture;
   branchRoughness: THREE.Texture;
@@ -160,7 +162,7 @@ const OPERATION_GUIDE_SECTIONS = [
       { hand: 'R', icon: 'move', action: 'Pan View', detail: 'Move hand' },
       { hand: 'R', icon: 'zoomIn', action: 'Zoom In', detail: 'Pinch close' },
       { hand: 'R', icon: 'zoomOut', action: 'Zoom Out', detail: 'Pinch open' },
-      { hand: 'L', icon: 'ok', action: 'Enter Gate', detail: 'OK 3s in deep zone' },
+      { hand: 'L', icon: 'ok', action: 'Unlock Gate', detail: 'OK 3s in deep zone' },
     ],
   },
   {
@@ -175,12 +177,13 @@ const OPERATION_GUIDE_SECTIONS = [
       { hand: 'R', icon: 'zoomIn', action: 'Focus Core', detail: 'Zoom to center' },
       { hand: 'L', icon: 'rotate', action: 'Rotate Core', detail: 'Twist wrist' },
       { hand: 'L', icon: 'hand', action: 'Stress / Split', detail: 'Hold fist' },
+      { hand: 'L', icon: 'ok', action: 'Finish World C', detail: 'OK 3s after stress' },
     ],
   },
   {
     title: 'Navigation',
     items: [
-      { hand: 'R', icon: 'zoomOut', action: 'Return', detail: 'Zoom out a world' },
+      { hand: 'R', icon: 'zoomOut', action: 'Gate Trigger', detail: 'Reach deep zone, then click the enter prompt' },
     ],
   },
 ] as const;
@@ -230,13 +233,22 @@ export function App() {
   const [worldDRotationProgress, setWorldDRotationProgress] = useState(0);
   const [worldDStressProgress, setWorldDStressProgress] = useState(0);
   const [worldDStressActive, setWorldDStressActive] = useState(false);
+  const [worldDStressCompleted, setWorldDStressCompleted] = useState(false);
   const [worldDZoomProgress, setWorldDZoomProgress] = useState(0);
   const [showOperationGuide, setShowOperationGuide] = useState(true);
+  const [pendingWorldPrompt, setPendingWorldPrompt] = useState<WorldGatePrompt | null>(null);
+  const [experienceCompleted, setExperienceCompleted] = useState(false);
+  const [restartCountdownMs, setRestartCountdownMs] = useState(EXPERIENCE_RESTART_DELAY_MS);
   const [, setWorldCLoading] = useState(false);
   const currentWorldRef = useRef<'A' | 'B' | 'C' | 'D'>('A');
   const worldBUnlockedRef = useRef(false);
   const worldCUnlockedRef = useRef(false);
   const worldDUnlockedRef = useRef(false);
+  const pendingWorldPromptRef = useRef<WorldGatePrompt | null>(null);
+  const dismissedWorldPromptRef = useRef<WorldGatePrompt | null>(null);
+  const experienceCompletedRef = useRef(false);
+  const restartDeadlineRef = useRef<number | null>(null);
+  const restartIntervalRef = useRef<number | null>(null);
   const deepZoneActiveRef = useRef(false);
   const deepZoneReachedRef = useRef(false);
   const deepZoneReachedBRef = useRef(false);
@@ -255,6 +267,7 @@ export function App() {
   const worldDStressHoldStartRef = useRef<number | null>(null);
   const worldDStressHoldProgressRef = useRef(0);
   const worldDStressActiveRef = useRef(false);
+  const worldDStressCompletedRef = useRef(false);
   const worldDZoomProgressRef = useRef(0);
   const worldDZoomCompletedRef = useRef(false);
   const worldDZoomStartDistanceRef = useRef<number | null>(null);
@@ -1373,7 +1386,6 @@ export function App() {
 
     worldDStressHoldStartRef.current = null;
     worldDStressHoldProgressRef.current = 0;
-    setWorldDStressProgress(0);
     worldDStressActiveRef.current = false;
     setWorldDStressActive(false);
     worldDFistStrengthRef.current = 0;
@@ -1519,6 +1531,39 @@ export function App() {
     worldDGrooveMaterialRef.current = null;
     worldDReadyRef.current = true;
   }, [buildWorldDCoreCell, buildWorldDParticles, buildWorldDNoiseTexture, ensureWorldDLights]);
+
+  const resetWorldCExperienceModel = useCallback(() => {
+    if (worldDGroupRef.current?.parent) {
+      worldDGroupRef.current.parent.remove(worldDGroupRef.current);
+    }
+    if (worldDParticlesRef.current) {
+      worldDParticlesRef.current.geometry.dispose();
+      (worldDParticlesRef.current.material as THREE.Material).dispose();
+    }
+    if (worldDCellGeometryRef.current) {
+      worldDCellGeometryRef.current.dispose();
+    }
+    if (worldDMaterialRef.current) {
+      worldDMaterialRef.current.dispose();
+    }
+    worldDGroupRef.current = null;
+    worldDCoreGroupRef.current = null;
+    worldDParticlesRef.current = null;
+    worldDParticleDataRef.current = null;
+    worldDFloatersRef.current = [];
+    worldDTopRef.current = null;
+    worldDBottomRef.current = null;
+    worldDGrooveRef.current = null;
+    worldDGrooveMaterialRef.current = null;
+    worldDMaterialRef.current = null;
+    worldDCoreCellsRef.current = [];
+    worldDSplitAnimatingRef.current = false;
+    worldDSplitStartRef.current = null;
+    worldDSplitGenerationRef.current = 0;
+    worldDSplitTriggerLatchRef.current = false;
+    worldDCellGeometryRef.current = null;
+    worldDReadyRef.current = false;
+  }, []);
 
   const cloneViewState = (state: ViewState) => ({
     position: state.position.clone(),
@@ -1681,9 +1726,35 @@ export function App() {
     setWorldDUnlocked(true);
   };
 
+  const setPendingWorldPromptState = (nextPrompt: WorldGatePrompt | null) => {
+    pendingWorldPromptRef.current = nextPrompt;
+    setPendingWorldPrompt(nextPrompt);
+  };
+
+  const clearPendingWorldPrompt = (world?: WorldGatePrompt) => {
+    if (world && pendingWorldPromptRef.current !== world) return;
+    setPendingWorldPromptState(null);
+  };
+
+  const requestPendingWorldPrompt = (world: WorldGatePrompt) => {
+    if (experienceCompletedRef.current || dismissedWorldPromptRef.current === world) return;
+    if (pendingWorldPromptRef.current === world) return;
+    setPendingWorldPromptState(world);
+  };
+
+  const clearExperienceRestartTimer = () => {
+    if (restartIntervalRef.current !== null) {
+      window.clearInterval(restartIntervalRef.current);
+      restartIntervalRef.current = null;
+    }
+    restartDeadlineRef.current = null;
+  };
+
   const switchWorld = (nextWorld: 'A' | 'B' | 'C' | 'D') => {
     if (currentWorldRef.current === nextWorld) return;
     const previousWorld = currentWorldRef.current;
+    setPendingWorldPromptState(null);
+    dismissedWorldPromptRef.current = null;
 
     if (nextWorld === 'C' && !worldDReadyRef.current) {
         ensureWorldDModel();
@@ -1845,6 +1916,108 @@ export function App() {
     deepZoneActiveRef.current = false;
   };
 
+  const resetExperienceFlow = useCallback(() => {
+    clearExperienceRestartTimer();
+    experienceCompletedRef.current = false;
+    setExperienceCompleted(false);
+    setRestartCountdownMs(EXPERIENCE_RESTART_DELAY_MS);
+    dismissedWorldPromptRef.current = null;
+    setPendingWorldPromptState(null);
+    pauseWorldBBackgroundVideo(true);
+
+    currentWorldRef.current = 'A';
+    setCurrentWorld('A');
+    worldSwitchCooldownRef.current = performance.now() + WORLD_SWITCH_COOLDOWN_MS;
+    lastZoomDistanceRef.current = null;
+    wheelZoomOutRef.current = 0;
+    deepZoneActiveRef.current = false;
+    setWorldVisibility('A');
+    applyZoomLimits('A');
+
+    worldBUnlockedRef.current = false;
+    setWorldBUnlocked(false);
+    worldCUnlockedRef.current = false;
+    setWorldCUnlocked(false);
+    worldDUnlockedRef.current = false;
+    setWorldDUnlocked(false);
+    deepZoneReachedRef.current = false;
+    setDeepZoneReached(false);
+    deepZoneReachedBRef.current = false;
+    setDeepZoneReachedB(false);
+    deepZoneReachedCRef.current = false;
+    setDeepZoneReachedC(false);
+
+    resetOkHold();
+    resetOkHoldC();
+    resetOkHoldD();
+
+    worldBVisitedRef.current = false;
+    worldBViewRef.current = null;
+    worldBReturnDistanceRef.current = null;
+    worldBReturnArmedRef.current = false;
+    worldBEntryArmedRef.current = false;
+    worldBEntryDistanceRef.current = null;
+    worldBInitialViewAppliedRef.current = false;
+    worldBLastWristAngleRef.current = null;
+    worldBRotationVelocityRef.current = 0;
+    worldCVisitedRef.current = false;
+    worldCEntryArmedRef.current = false;
+    worldCReturnDistanceRef.current = null;
+    worldCReturnArmedRef.current = false;
+
+    worldDVisitedRef.current = false;
+    worldDViewRef.current = null;
+    worldDEntryArmedRef.current = false;
+    worldDReturnDistanceRef.current = null;
+    worldDReturnArmedRef.current = false;
+    worldDRotationAccumRef.current = 0;
+    worldDRotationProgressRef.current = 0;
+    setWorldDRotationProgress(0);
+    worldDStressHoldStartRef.current = null;
+    worldDStressHoldProgressRef.current = 0;
+    setWorldDStressProgress(0);
+    worldDStressCompletedRef.current = false;
+    setWorldDStressCompleted(false);
+    worldDStressActiveRef.current = false;
+    setWorldDStressActive(false);
+    worldDZoomProgressRef.current = 0;
+    worldDZoomCompletedRef.current = false;
+    worldDZoomStartDistanceRef.current = null;
+    setWorldDZoomProgress(0);
+    worldDLastWristAngleRef.current = null;
+    worldDFistStrengthRef.current = 0;
+    resetWorldCExperienceModel();
+
+    if (worldBModelRef.current) {
+      fitWorldBModel(worldBModelRef.current);
+    }
+
+    if (defaultViewRef.current) {
+      const initialView = cloneViewState(defaultViewRef.current);
+      worldAViewRef.current = cloneViewState(initialView);
+      applyViewState(initialView);
+    }
+
+    worldAGrowthRef.current = 0;
+    worldBGrowthRef.current = MAX_GROWTH;
+    initialAGrowthCompletedRef.current = false;
+    if (materialRef.current) {
+      materialRef.current.uniforms.uGrowth.value = 0;
+    }
+    if (lineMaterialRef.current) {
+      lineMaterialRef.current.uniforms.uGrowth.value = 0;
+    }
+    setGrowth(0);
+    animatingRef.current = true;
+    setAnimating(true);
+    setShowOperationGuide(true);
+
+    if (controlsRef.current) {
+      controlsRef.current.autoRotate = !handControlEnabled;
+      controlsRef.current.update();
+    }
+  }, [fitWorldBModel, handControlEnabled, pauseWorldBBackgroundVideo, resetWorldCExperienceModel]);
+
   const setWorldImage = (nextImage: string) => {
     if (currentWorldRef.current === 'A') {
         worldAImageRef.current = nextImage;
@@ -1962,7 +2135,7 @@ export function App() {
     }
     if (progress >= 1) {
         unlockWorldB();
-        switchWorld('B');
+        requestPendingWorldPrompt('B');
     }
   };
 
@@ -1983,12 +2156,22 @@ export function App() {
     }
     if (progress >= 1) {
         unlockWorldC();
-        enterWorldC();
+        requestPendingWorldPrompt('C');
     }
   };
 
   const updateOkHoldD = (isOk: boolean) => {
-    if (currentWorldRef.current !== 'C' || worldDUnlockedRef.current || !deepZoneActiveRef.current || !isOk) {
+    if (currentWorldRef.current !== 'C' || !worldDStressCompletedRef.current) {
+        resetOkHoldD();
+        return;
+    }
+    if (worldDUnlockedRef.current) {
+        if (okHoldProgressDRef.current !== 1) {
+            setOkProgressD(1);
+        }
+        return;
+    }
+    if (!isOk) {
         resetOkHoldD();
         return;
     }
@@ -2003,8 +2186,8 @@ export function App() {
         setOkProgressD(progress);
     }
     if (progress >= 1) {
-        unlockWorldC();
-        enterWorldC();
+        unlockWorldD();
+        setOkProgressD(1);
     }
   };
 
@@ -2147,7 +2330,7 @@ export function App() {
                     if (worldDStressActiveRef.current) {
                         worldDStressActiveRef.current = false;
                         setWorldDStressActive(false);
-                        if (worldDStressHoldProgressRef.current < 1) {
+                        if (!worldDStressCompletedRef.current) {
                             worldDStressHoldStartRef.current = null;
                             worldDStressHoldProgressRef.current = 0;
                             setWorldDStressProgress(0);
@@ -2303,6 +2486,7 @@ export function App() {
   // --- End Hand Tracking Logic ---
 
   const cleanupScene = () => {
+    clearExperienceRestartTimer();
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     worldBLightRigRef.current = null;
     worldBMaterialsRef.current = [];
@@ -2412,6 +2596,13 @@ export function App() {
         position: camera.position.clone(),
         target: controls.target.clone(),
     };
+    clearExperienceRestartTimer();
+    pendingWorldPromptRef.current = null;
+    dismissedWorldPromptRef.current = null;
+    experienceCompletedRef.current = false;
+    setPendingWorldPrompt(null);
+    setExperienceCompleted(false);
+    setRestartCountdownMs(EXPERIENCE_RESTART_DELAY_MS);
     defaultViewRef.current = initialView;
     worldAViewRef.current = cloneViewState(initialView);
     worldBVisitedRef.current = false;
@@ -2477,6 +2668,8 @@ export function App() {
     worldDStressHoldStartRef.current = null;
     worldDStressHoldProgressRef.current = 0;
     setWorldDStressProgress(0);
+    worldDStressCompletedRef.current = false;
+    setWorldDStressCompleted(false);
     worldDStressActiveRef.current = false;
     setWorldDStressActive(false);
     worldDZoomProgressRef.current = 0;
@@ -2773,68 +2966,38 @@ export function App() {
                                         } else {
                                             if (isWorldA) {
                                                 resetOkHold();
+                                                clearPendingWorldPrompt('B');
+                                                if (dismissedWorldPromptRef.current === 'B') {
+                                                    dismissedWorldPromptRef.current = null;
+                                                }
                                             }
                                             if (isWorldB) {
                                                 resetOkHoldC();
+                                                clearPendingWorldPrompt('C');
+                                                if (dismissedWorldPromptRef.current === 'C') {
+                                                    dismissedWorldPromptRef.current = null;
+                                                }
                                             }
                                         }
                                     }
-                                } else if (deepZoneActiveRef.current) {
-                                    deepZoneActiveRef.current = false;
+
+                                    if (isDeepZone) {
+                                        if (isWorldA && worldBUnlockedRef.current) {
+                                            requestPendingWorldPrompt('B');
+                                        }
+                                        if (isWorldB && worldCUnlockedRef.current) {
+                                            requestPendingWorldPrompt('C');
+                                        }
+                                    }
+                                } else {
+                                    if (deepZoneActiveRef.current) {
+                                        deepZoneActiveRef.current = false;
+                                    }
                                     resetOkHold();
                                     resetOkHoldC();
-                                    resetOkHoldD();
+                                    clearPendingWorldPrompt();
                                 }
 
-const now = performance.now();
-                                const distDelta = lastZoomDistanceRef.current === null ? 0 : distToTarget - lastZoomDistanceRef.current;
-                                lastZoomDistanceRef.current = distToTarget;
-                                const wheelZoomOut = now < wheelZoomOutRef.current;
-                                const zoomOutIntent = rightHandZoomTargetRef.current < -0.2 || distDelta > 0.2 || wheelZoomOut;
-
-                                                                if (now >= worldSwitchCooldownRef.current) {
-                                    const returnDistance = worldBReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
-                                    if (currentWorldRef.current === 'B') {
-                                        const armDistance = Math.max(returnDistance - RETURN_ARM_MARGIN, getWorldMinZoomDistance('B'));
-                                        if (!worldBReturnArmedRef.current && distToTarget < armDistance) {
-                                            worldBReturnArmedRef.current = true;
-                                        }
-                                        if (worldBReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistance) {
-                                            switchWorld('A');
-                                        }
-                                    }
-                                
-                                    const returnDistanceC = worldDReturnDistanceRef.current ?? RETURN_ZONE_DISTANCE;
-                                    if (currentWorldRef.current === 'C') {
-                                        const armDistanceC = Math.max(returnDistanceC - RETURN_ARM_MARGIN, getWorldMinZoomDistance('C'));
-                                        if (!worldDReturnArmedRef.current && distToTarget < armDistanceC) {
-                                            worldDReturnArmedRef.current = true;
-                                        }
-                                        if (worldDReturnArmedRef.current && zoomOutIntent && distToTarget >= returnDistanceC) {
-                                            switchWorld('B');
-                                        }
-                                    }
-                                }
-
-if (currentWorldRef.current === 'A' && worldBUnlockedRef.current) {
-                                    const reenterDistance = DEEP_ZONE_DISTANCE + REENTER_ARM_MARGIN;
-                                    if (!worldBEntryArmedRef.current && distToTarget > reenterDistance) {
-                                        worldBEntryArmedRef.current = true;
-                                    }
-                                    if (worldBEntryArmedRef.current && isDeepZone) {
-                                        switchWorld('B');
-                                    }
-                                }
-
-                                                                if (currentWorldRef.current === 'B' && worldCUnlockedRef.current) {
-                                    const reenterDistanceC = getWorldMinZoomDistance('B') + REENTER_ARM_MARGIN_C + 10;
-                                    if (!worldCEntryArmedRef.current && distToTarget > reenterDistanceC) {
-                                        worldCEntryArmedRef.current = true;
-                                    }
-                                    if (worldCEntryArmedRef.current && isDeepZone) {
-                                        enterWorldC();
-                                    }
-                                }
 
 if (currentWorldRef.current === 'C') {
                                     const rootGroup = worldDGroupRef.current;
@@ -2942,12 +3105,20 @@ if (currentWorldRef.current === 'C') {
                                         }
                                         const elapsed = performance.now() - worldDStressHoldStartRef.current;
                                         const progress = Math.min(elapsed / WORLD_D_STRESS_HOLD_MS, 1);
-                                        if (Math.abs(progress - worldDStressHoldProgressRef.current) > 0.01) {
+                                        if (!worldDStressCompletedRef.current && Math.abs(progress - worldDStressHoldProgressRef.current) > 0.01) {
                                             worldDStressHoldProgressRef.current = progress;
                                             setWorldDStressProgress(progress);
                                         }
-                                        if (progress >= 1 && !worldDSplitAnimatingRef.current && !worldDSplitTriggerLatchRef.current) {
-                                            triggerWorldDSplit();
+                                        if (progress >= 1) {
+                                            if (!worldDStressCompletedRef.current) {
+                                                worldDStressCompletedRef.current = true;
+                                                setWorldDStressCompleted(true);
+                                                worldDStressHoldProgressRef.current = 1;
+                                                setWorldDStressProgress(1);
+                                            }
+                                            if (!worldDSplitAnimatingRef.current && !worldDSplitTriggerLatchRef.current) {
+                                                triggerWorldDSplit();
+                                            }
                                         }
                                     } else if (worldDSplitTriggerLatchRef.current) {
                                         worldDSplitTriggerLatchRef.current = false;
@@ -3194,6 +3365,41 @@ if (materialRef.current) {
     pauseWorldBBackgroundVideo();
   }, [currentWorld, ensureWorldBBackground, playWorldBBackgroundVideo, pauseWorldBBackgroundVideo]);
 
+  useEffect(() => {
+    const allWorldCTasksComplete = currentWorld === 'C'
+      && worldDZoomProgress >= 1
+      && worldDRotationProgress >= 1
+      && worldDUnlocked;
+
+    if (!allWorldCTasksComplete || experienceCompletedRef.current) {
+      return;
+    }
+
+    experienceCompletedRef.current = true;
+    dismissedWorldPromptRef.current = null;
+    setPendingWorldPromptState(null);
+    setExperienceCompleted(true);
+    setRestartCountdownMs(EXPERIENCE_RESTART_DELAY_MS);
+    clearExperienceRestartTimer();
+
+    const deadline = performance.now() + EXPERIENCE_RESTART_DELAY_MS;
+    restartDeadlineRef.current = deadline;
+    restartIntervalRef.current = window.setInterval(() => {
+      const remaining = Math.max(0, deadline - performance.now());
+      setRestartCountdownMs(remaining);
+      if (remaining <= 0) {
+        clearExperienceRestartTimer();
+        resetExperienceFlow();
+      }
+    }, 200);
+  }, [currentWorld, worldDZoomProgress, worldDRotationProgress, worldDUnlocked, resetExperienceFlow]);
+
+  useEffect(() => {
+    return () => {
+      clearExperienceRestartTimer();
+    };
+  }, []);
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -3227,6 +3433,28 @@ if (materialRef.current) {
           animatingRef.current = true;
           setAnimating(true);
       }
+  };
+
+  const handleConfirmPendingWorld = () => {
+      const nextPrompt = pendingWorldPromptRef.current;
+      if (!nextPrompt) return;
+      dismissedWorldPromptRef.current = null;
+      setPendingWorldPromptState(null);
+      if (nextPrompt === 'B') {
+          switchWorld('B');
+          return;
+      }
+      enterWorldC();
+  };
+
+  const handleDismissPendingWorld = () => {
+      if (!pendingWorldPromptRef.current) return;
+      dismissedWorldPromptRef.current = pendingWorldPromptRef.current;
+      setPendingWorldPromptState(null);
+  };
+
+  const handleRestartExperienceNow = () => {
+      resetExperienceFlow();
   };
 
   const handleGrowthSlider = (val: number) => {
@@ -3268,6 +3496,22 @@ if (materialRef.current) {
     return false;
   });
   const inlineGuideItems = inlineGuideSections.flatMap((section) => section.items);
+  const pendingWorldPromptMeta = pendingWorldPrompt === 'B'
+    ? {
+        eyebrow: 'World A Complete',
+        title: 'Enter World B?',
+        description: 'The inner gate is unlocked. Click below to move into the next layer.',
+        action: 'Enter World B',
+      }
+    : pendingWorldPrompt === 'C'
+      ? {
+          eyebrow: 'World B Complete',
+          title: 'Enter World C?',
+          description: 'The deep coral model has opened a new inner layer. Click to continue inward.',
+          action: 'Enter World C',
+        }
+      : null;
+  const restartCountdownSeconds = Math.max(0, Math.ceil(restartCountdownMs / 1000));
 
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden font-sans text-white">
@@ -3279,8 +3523,12 @@ if (materialRef.current) {
         playsInline
         preload="auto"
         crossOrigin="anonymous"
-        className={`absolute inset-0 z-0 h-full w-full object-cover pointer-events-none transition-opacity duration-300 ${currentWorld === 'B' ? 'opacity-100' : 'opacity-0'}`}
-        style={{ filter: 'brightness(0.52) saturate(0.92) contrast(1.04)' }}
+        className="absolute inset-0 z-0 h-full w-full object-cover pointer-events-none transition-opacity duration-300"
+        style={{
+          filter: 'brightness(0.52) saturate(0.92) contrast(1.04)',
+          display: currentWorld === 'B' ? 'block' : 'none',
+          opacity: currentWorld === 'B' ? 1 : 0,
+        }}
         aria-hidden="true"
       />
       <div ref={mountRef} className="absolute inset-0 z-10" />
@@ -3382,6 +3630,49 @@ if (materialRef.current) {
         </div>
       )}
 
+      {imageSrc && !loading && pendingWorldPromptMeta && !showOperationGuide && !experienceCompleted && (
+        <div className="pointer-events-none absolute inset-0 z-[34] flex items-center justify-center px-4">
+          <div className="pointer-events-auto w-full max-w-md rounded-2xl border border-emerald-500/25 bg-neutral-950/92 p-5 shadow-[0_30px_80px_rgba(0,0,0,0.45)] backdrop-blur-xl sm:p-6">
+            <div className="text-[11px] uppercase tracking-[0.28em] text-emerald-300/80">{pendingWorldPromptMeta.eyebrow}</div>
+            <h3 className="mt-3 text-2xl font-light tracking-[0.08em] text-white">{pendingWorldPromptMeta.title}</h3>
+            <p className="mt-3 text-sm leading-6 text-neutral-400">{pendingWorldPromptMeta.description}</p>
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+              <button
+                onClick={handleConfirmPendingWorld}
+                className="rounded-full bg-emerald-500 px-5 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-black transition-colors hover:bg-emerald-400"
+              >
+                {pendingWorldPromptMeta.action}
+              </button>
+              <button
+                onClick={handleDismissPendingWorld}
+                className="rounded-full border border-neutral-700 px-5 py-3 text-xs uppercase tracking-[0.22em] text-neutral-200 transition-colors hover:border-neutral-500 hover:text-white"
+              >
+                Stay Here
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {imageSrc && !loading && experienceCompleted && (
+        <div className="pointer-events-none absolute inset-0 z-[36] flex items-center justify-center bg-black/38 px-4 backdrop-blur-[2px]">
+          <div className="pointer-events-auto w-full max-w-lg rounded-2xl border border-amber-300/18 bg-neutral-950/94 p-5 shadow-[0_32px_80px_rgba(0,0,0,0.5)] sm:p-6">
+            <div className="text-[11px] uppercase tracking-[0.28em] text-amber-200/80">Experience Complete</div>
+            <h3 className="mt-3 text-2xl font-light tracking-[0.08em] text-white">All World C Tasks Completed</h3>
+            <p className="mt-3 text-sm leading-6 text-neutral-400">This run is complete. The experience will restart from World A for the next visitor in <span className="text-amber-200">{restartCountdownSeconds}s</span>.</p>
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                onClick={handleRestartExperienceNow}
+                className="rounded-full bg-amber-300 px-5 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-black transition-colors hover:bg-amber-200"
+              >
+                Restart Now
+              </button>
+              <div className="text-xs uppercase tracking-[0.22em] text-neutral-500">Auto restart enabled</div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Controls */}
       {imageSrc && !loading && (
         <>
@@ -3460,7 +3751,7 @@ if (materialRef.current) {
                                     </div>
                                 )}
                                 {worldBUnlocked && (
-                                    <div className="text-[10px] text-emerald-400 mt-1">World B unlocked</div>
+                                    <div className="text-[10px] text-emerald-400 mt-1">Gate unlocked. Click the enter prompt in the deep zone</div>
                                 )}
                             </div>
                         </div>
@@ -3498,7 +3789,7 @@ if (materialRef.current) {
                                             </div>
                                         )}
                                         {worldCUnlocked && (
-                                            <div className="text-[10px] text-emerald-400 mt-1">World C unlocked</div>
+                                            <div className="text-[10px] text-emerald-400 mt-1">Gate unlocked. Click the enter prompt in the deep zone</div>
                                         )}
                                     </div>
                                 </div>
@@ -3566,15 +3857,15 @@ if (materialRef.current) {
                                 </div>
 
                                 <div className="flex items-start gap-3">
-                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDStressProgress >= 1 ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDStressCompleted ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
                                     <div className="flex-1">
-                                        <div className={`text-[11px] ${worldDStressProgress >= 1 ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                        <div className={`text-[11px] ${worldDStressCompleted ? 'text-emerald-300' : 'text-neutral-300'}`}>
                                             Task 7: Left-hand fist stress for 3 seconds
                                         </div>
                                         {worldDRotationProgress < 1 && (
                                             <div className="text-[10px] text-neutral-500 mt-1">Complete rotation before stress testing.</div>
                                         )}
-                                        {worldDRotationProgress >= 1 && worldDStressProgress < 1 && (
+                                        {worldDRotationProgress >= 1 && !worldDStressCompleted && (
                                             <div className="mt-2">
                                                 <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
                                                     <span>{worldDStressActive ? "Stress active" : "Awaiting left-hand fist"}</span>
@@ -3588,8 +3879,37 @@ if (materialRef.current) {
                                                 </div>
                                             </div>
                                         )}
-                                        {worldDStressProgress >= 1 && (
+                                        {worldDStressCompleted && (
                                             <div className="text-[10px] text-emerald-400 mt-1">Stress hold confirmed</div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="flex items-start gap-3">
+                                    <span className={`mt-1 inline-block h-2 w-2 rounded-full ${worldDUnlocked ? 'bg-emerald-500' : 'bg-neutral-700'}`} />
+                                    <div className="flex-1">
+                                        <div className={`text-[11px] ${worldDUnlocked ? 'text-emerald-300' : 'text-neutral-300'}`}>
+                                            Task 8: Left-hand OK for 3 seconds
+                                        </div>
+                                        {!worldDStressCompleted && (
+                                            <div className="text-[10px] text-neutral-500 mt-1">Complete the stress task before final confirmation.</div>
+                                        )}
+                                        {worldDStressCompleted && !worldDUnlocked && (
+                                            <div className="mt-2">
+                                                <div className="flex justify-between text-[10px] text-neutral-500 mb-1">
+                                                    <span>Final confirmation</span>
+                                                    <span>{Math.round(okHoldProgressD * 100)}%</span>
+                                                </div>
+                                                <div className="h-1 w-full bg-neutral-800 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-emerald-500 transition-[width] duration-150"
+                                                        style={{ width: `${Math.round(okHoldProgressD * 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+                                        {worldDUnlocked && (
+                                            <div className="text-[10px] text-emerald-400 mt-1">All World C tasks confirmed</div>
                                         )}
                                     </div>
                                 </div>
@@ -3600,13 +3920,13 @@ if (materialRef.current) {
                             <div className="text-[10px] text-neutral-500">Tip: enable hand control to confirm.</div>
                         )}
                         {worldBUnlocked && !worldCUnlocked && currentWorld === 'B' && (
-                            <div className="text-[10px] text-neutral-500">Tip: zoom into World B deep zone to enter World C.</div>
+                            <div className="text-[10px] text-neutral-500">Tip: after unlocking the gate, zoom into the deep zone and click the prompt to enter World C.</div>
                         )}
                         {worldBUnlocked && !worldCUnlocked && !handControlEnabled && (
                             <div className="text-[10px] text-neutral-500">Tip: enable hand control to confirm Task 4.</div>
                         )}
                         {currentWorld === 'C' && (
-                            <div className="text-[10px] text-neutral-500">Tip: zoom out to return to World B.</div>
+                            <div className="text-[10px] text-neutral-500">Tip: finish Task 8 with a left-hand OK hold to complete the experience.</div>
                         )}
                     </div>
                 </div>
