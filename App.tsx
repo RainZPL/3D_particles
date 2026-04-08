@@ -2892,11 +2892,21 @@ export function App() {
                     const zoomStep = zoomDelta > 0 ? zoomDelta * zoomSpeedIn : zoomDelta * zoomSpeedOut;
 
                     if (zoomStep !== 0) {
-                        camera.getWorldDirection(handView);
-                        if (zoomStep > 0 && handDistToTarget > handMinZoomDistance) {
-                            camera.position.addScaledVector(handView, zoomStep);
-                        } else if (zoomStep < 0 && handDistToTarget < handMaxZoomDistance) {
-                            camera.position.addScaledVector(handView, zoomStep);
+                        const zoomOffset = camera.position.clone().sub(controls.target);
+                        if (zoomOffset.lengthSq() > 0.0001) {
+                            const nextDistance = THREE.MathUtils.clamp(
+                                handDistToTarget - zoomStep,
+                                handMinZoomDistance,
+                                handMaxZoomDistance,
+                            );
+                            zoomOffset.setLength(nextDistance);
+                            camera.position.copy(controls.target).add(zoomOffset);
+
+                            const hitMinBoundary = nextDistance <= handMinZoomDistance + 0.5 && zoomStep > 0;
+                            const hitMaxBoundary = nextDistance >= handMaxZoomDistance - 0.5 && zoomStep < 0;
+                            if (hitMinBoundary || hitMaxBoundary) {
+                                rightHandZoomVelocityRef.current = 0;
+                            }
                         }
                     }
                 } else {
